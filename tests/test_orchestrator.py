@@ -64,6 +64,23 @@ class TestSFTMethod:
         assert remote_config["hf_dataset"] == "tatsu-lab/alpaca"
         assert remote_config["wandb_project"] == "test"
 
+    def test_generate_remote_config_with_validation(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="sft", pod_id="pod_abc123"),
+            model=ModelConfig(name="Qwen/Qwen3-0.6B"),
+            dataset=DatasetConfig(
+                source="huggingface",
+                path="tatsu-lab/alpaca",
+                validation_ratio=0.1,
+                validation_seed=7,
+            ),
+        )
+        method = get_method("sft")
+        remote_config = method.generate_remote_config(config)
+
+        assert remote_config["validation_ratio"] == 0.1
+        assert remote_config["validation_seed"] == 7
+
     def test_script_path_exists(self):
         method = get_method("sft")
         assert method.script_path().exists()

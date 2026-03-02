@@ -67,6 +67,19 @@ class TestDatasetConfig:
         )
         assert config.field_mapping["instruction"] == "prompt"
 
+    def test_validation_split_defaults(self):
+        config = DatasetConfig(source="huggingface", path="tatsu-lab/alpaca")
+        assert config.validation_ratio is None
+        assert config.validation_seed == 42
+
+    def test_validation_ratio_bounds(self):
+        with pytest.raises(Exception):
+            DatasetConfig(
+                source="huggingface",
+                path="tatsu-lab/alpaca",
+                validation_ratio=1.0,
+            )
+
 
 class TestTrainingConfig:
     def test_defaults(self):
@@ -141,3 +154,30 @@ wandb_project = "test-project"
         assert config.training.epochs == 5
         assert config.training.lr == 1e-4
         assert config.monitoring.wandb_project == "test-project"
+
+    def test_load_from_toml_with_utf8_bom(self):
+        toml_content = (
+            b"\xef\xbb\xbf"
+            b"""
+[run]
+method = "sft"
+
+[pod]
+image = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+
+[model]
+name = "Qwen/Qwen3-0.6B"
+
+[dataset]
+source = "huggingface"
+path = "tatsu-lab/alpaca"
+validation_ratio = 0.1
+"""
+        )
+        with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as f:
+            f.write(toml_content)
+            f.flush()
+            config = resolve_config(RunConfig, f.name)
+        os.unlink(f.name)
+
+        assert config.dataset.validation_ratio == 0.1
