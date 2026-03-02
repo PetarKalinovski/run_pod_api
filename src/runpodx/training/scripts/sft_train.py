@@ -31,8 +31,8 @@ def load_config(path: str) -> dict:
         return json.load(f)
 
 
-def load_sft_dataset(config: dict) -> Dataset:
-    """Load dataset from local JSONL or HuggingFace."""
+def load_sft_dataset(config: dict) -> tuple[Dataset, Dataset | None]:
+    """Load dataset and optionally split off a validation set."""
     local_path = config.get("dataset_path")
     hf_dataset = config.get("hf_dataset")
 
@@ -49,7 +49,32 @@ def load_sft_dataset(config: dict) -> Dataset:
     if max_samples and len(ds) > max_samples:
         ds = ds.select(range(max_samples))
 
-    return ds
+    validation_ratio = config.get("validation_ratio")
+    if validation_ratio:
+        split = ds.train_test_split(
+            test_size=validation_ratio,
+            seed=config.get("validation_seed", 42),
+            shuffle=True,
+        )
+        return split["train"], split["test"]
+
+    return ds, None
+
+
+def build_training_args(config_cls, common_args: dict, eval_enabled: bool):
+    """Build TrainingArguments/SFTConfig with version-compatible eval kwargs."""
+    eval_key = "eval_strategy"
+    if eval_enabled:
+        common_args[eval_key] = "epoch"
+
+    try:
+        return config_cls(**common_args)
+    except TypeError as exc:
+        if eval_enabled and "eval_strategy" in common_args:
+            legacy_args = dict(common_args)
+            legacy_args["evaluation_strategy"] = legacy_args.pop("eval_strategy")
+            return config_cls(**legacy_args)
+        raise exc
 
 
 def format_alpaca(example: dict) -> str:
@@ -143,8 +168,10 @@ def main():
 
     # --- Dataset ---
     print("[runpodx] Loading dataset...")
-    dataset = load_sft_dataset(config)
-    print(f"[runpodx] Dataset size: {len(dataset)}")
+    train_dataset, eval_dataset = load_sft_dataset(config)
+    print(f"[runpodx] Train dataset size: {len(train_dataset)}")
+    if eval_dataset is not None:
+        print(f"[runpodx] Validation dataset size: {len(eval_dataset)}")
 
     # --- Training args ---
     common_args = dict(
@@ -175,12 +202,24 @@ def main():
     max_seq = config.get("max_seq_length", 2048)
     if SFTConfig is not None:
         try:
-            training_args = SFTConfig(max_seq_length=max_seq, **common_args)
+            training_args = build_training_args(
+                SFTConfig,
+                {"max_seq_length": max_seq, **common_args},
+                eval_enabled=eval_dataset is not None,
+            )
             max_seq = None  # already in config, don't pass to SFTTrainer
         except TypeError:
-            training_args = TrainingArguments(**common_args)
+            training_args = build_training_args(
+                TrainingArguments,
+                common_args,
+                eval_enabled=eval_dataset is not None,
+            )
     else:
-        training_args = TrainingArguments(**common_args)
+        training_args = build_training_args(
+            TrainingArguments,
+            common_args,
+            eval_enabled=eval_dataset is not None,
+        )
 
     # --- Train ---
     dataset_format = config.get("dataset_format", "alpaca")
@@ -194,10 +233,12 @@ def main():
     trainer_kwargs = dict(
         model=model,
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=train_dataset,
         processing_class=tokenizer,
         formatting_func=formatting_func,
     )
+    if eval_dataset is not None:
+        trainer_kwargs["eval_dataset"] = eval_dataset
     if max_seq is not None:
         # Try passing to SFTTrainer; if rejected, set on tokenizer as fallback
         try:
@@ -224,6 +265,11 @@ def main():
         print(f"[runpodx] Resuming from checkpoint: {resume_from}")
 
     trainer.train(resume_from_checkpoint=resume_from)
+
+    if eval_dataset is not None:
+        print("[runpodx] Running final validation...")
+        metrics = trainer.evaluate()
+        print(f"[runpodx] Validation metrics: {metrics}")
 
     # --- Save ---
     print("[runpodx] Saving model...")

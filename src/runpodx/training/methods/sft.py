@@ -77,6 +77,10 @@ class SFTMethod(BaseMethod):
         if d.max_samples is not None:
             config["max_samples"] = d.max_samples
 
+        if d.validation_ratio is not None:
+            config["validation_ratio"] = d.validation_ratio
+            config["validation_seed"] = d.validation_seed
+
         return config
 
     def canonical_format(self) -> str:

@@ -101,6 +101,18 @@ class DatasetConfig(BaseConfig):
         Field(description="Input data format for normalization."),
     ] = "alpaca"
     max_samples: Annotated[int | None, Field(ge=1, description="Limit dataset size.")] = None
+    validation_ratio: Annotated[
+        float | None,
+        Field(
+            gt=0.0,
+            lt=1.0,
+            description="Fraction of samples reserved for validation. None disables eval.",
+        ),
+    ] = None
+    validation_seed: Annotated[
+        int,
+        Field(description="Random seed used when splitting train/validation."),
+    ] = 42
     field_mapping: Annotated[
         dict[str, str] | None,
         Field(description="Field mapping for custom format."),
