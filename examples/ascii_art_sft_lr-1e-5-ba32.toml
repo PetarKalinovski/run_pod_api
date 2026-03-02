@@ -1,0 +1,52 @@
+# Full SFT of Qwen3-8B on ASCII art (human-crafted, 5.3k samples)
+# Usage: runpodx run examples/ascii_art_sft.toml
+#        runpodx run examples/ascii_art_sft.toml --dry-run
+
+[run]
+method = "sft"
+
+[pod]
+name = "qwen3-ascii-art-sft"
+image = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+cloud_type = "SECURE"
+container_disk_gb = 80
+volume_gb = 130
+
+[pod.gpu]
+type_ids = ["NVIDIA A100-SXM4-80GB"]
+count = 1
+
+[model]
+name = "Qwen/Qwen3-8B"
+adapter = "full"
+
+[dataset]
+source = "huggingface"
+path = "AvaLovelace/ASCII-Art"
+split = "train"
+format = "sharegpt"
+
+[training]
+epochs = 3
+lr = 1e-5
+batch_size = 2
+gradient_accumulation = 32
+max_seq_length = 4096
+warmup_ratio = 0.05
+weight_decay = 0.01
+bf16 = true
+optimizer = "adamw_8bit"
+logging_steps = 5
+save_steps = 100
+save_total_limit = 3
+
+[output]
+save_path = "/workspace/output"
+push_to_hub = true
+hub_model_id = "PetarKal/Qwen3-8B-ascii-art-lr1e-5-ga32"  # <-- change to your HF username
+
+[monitoring]
+wandb_project = "qwen3-ascii-art"
+wandb_run_name = "qwen3-8b-full-sft-lr1e-5-ga32"
+log_interval = 5
+wandb_entity = "petar-kalinovski-"

@@ -1,0 +1,24 @@
+# Multi-GPU training pod
+name = "training-4xH100"
+image = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+cloud_type = "SECURE"
+
+[gpu]
+count = 4
+type_ids = ["NVIDIA H100 80GB HBM3", "NVIDIA A100 80GB PCIe"]
+type_priority = "custom"
+min_ram_per_gpu = 16
+min_vcpu_per_gpu = 4
+
+[storage]
+container_disk_gb = 200
+volume_gb = 100
+volume_mount_path = "/workspace"
+
+[networking]
+ports = ["8888/http", "22/tcp", "6006/http"]
+data_center_ids = ["US-TX-3", "US-IL-1"]
+
+[env]
+CUDA_VISIBLE_DEVICES = "0,1,2,3"
+WANDB_API_KEY = "${WANDB_API_KEY}"

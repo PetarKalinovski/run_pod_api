@@ -1,0 +1,53 @@
+# SFT fine-tuning of Qwen3-0.6B on Alpaca dataset
+# Usage: runpodx run examples/sft_training.toml
+#        runpodx run examples/sft_training.toml --dry-run
+#        runpodx run examples/sft_training.toml --pod pod_abc123
+
+[run]
+method = "sft"
+# pod_id = "existing_pod_123"    # uncomment to use existing pod
+
+[pod]
+name = "qwen3-sft-run"
+image = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+cloud_type = "SECURE"
+container_disk_gb = 50
+volume_gb = 50
+
+[pod.gpu]
+type_ids = ["NVIDIA A100 80GB PCIe"]
+count = 1
+
+[model]
+name = "Qwen/Qwen3-0.6B"
+adapter = "lora"
+lora_r = 16
+lora_alpha = 32
+lora_dropout = 0.05
+
+[dataset]
+source = "huggingface"
+path = "tatsu-lab/alpaca"
+split = "train"
+format = "alpaca"
+max_samples = 1000
+
+[training]
+epochs = 3
+lr = 2e-5
+batch_size = 4
+gradient_accumulation = 8
+max_seq_length = 2048
+warmup_ratio = 0.03
+weight_decay = 0.01
+bf16 = true
+optimizer = "adamw_8bit"
+
+[output]
+save_path = "/workspace/output"
+push_to_hub = false
+
+[monitoring]
+wandb_project = "qwen3-sft"
+wandb_run_name = "qwen3-0.6b-alpaca"
+log_interval = 10

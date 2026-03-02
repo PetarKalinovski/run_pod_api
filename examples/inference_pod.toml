@@ -1,0 +1,20 @@
+# vLLM inference serving pod
+name = "vllm-server"
+image = "vllm/vllm-openai:latest"
+
+[gpu]
+count = 1
+type_ids = ["NVIDIA A100 80GB PCIe"]
+
+[storage]
+container_disk_gb = 100
+volume_gb = 200
+
+[networking]
+ports = ["8000/http", "22/tcp"]
+
+docker_start_cmd = [
+    "python", "-m", "vllm.entrypoints.openai.api_server",
+    "--model", "meta-llama/Llama-3.1-8B-Instruct",
+    "--max-model-len", "4096",
+]
