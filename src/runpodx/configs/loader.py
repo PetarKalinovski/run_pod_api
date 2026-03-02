@@ -16,8 +16,8 @@ def load_toml(path: str | Path) -> dict:
         raise ConfigError(f"Config file not found: {path}")
     if path.suffix != ".toml":
         raise ConfigError(f"Expected a .toml file, got: {path}")
-    with open(path, "rb") as f:
-        return tomllib.load(f)
+    # Accept UTF-8 files with or without a BOM.
+    return tomllib.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def resolve_config(config_cls: type[T], source: str | Path | dict | T) -> T:
