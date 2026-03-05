@@ -31,12 +31,12 @@ class BaseMethod(ABC):
     """Base class for training methods (SFT, GRPO, etc.)."""
 
     @abstractmethod
-    def script_path(self) -> Path:
+    def script_path(self, run_config: RunConfig | None = None) -> Path:
         """Path to the training script to upload."""
         ...
 
     @abstractmethod
-    def requirements_path(self) -> Path:
+    def requirements_path(self, run_config: RunConfig | None = None) -> Path:
         """Path to the requirements.txt for this method."""
         ...
 

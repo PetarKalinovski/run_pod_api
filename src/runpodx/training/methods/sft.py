@@ -12,10 +12,20 @@ _SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 class SFTMethod(BaseMethod):
     """Supervised Fine-Tuning method."""
 
-    def script_path(self) -> Path:
+    @staticmethod
+    def _use_trinity_runtime(run_config: RunConfig | None) -> bool:
+        if run_config is None:
+            return False
+        return run_config.model.name.lower().startswith("arcee-ai/trinity-")
+
+    def script_path(self, run_config: RunConfig | None = None) -> Path:
+        if self._use_trinity_runtime(run_config):
+            return _SCRIPTS_DIR / "sft_train_trinity.py"
         return _SCRIPTS_DIR / "sft_train.py"
 
-    def requirements_path(self) -> Path:
+    def requirements_path(self, run_config: RunConfig | None = None) -> Path:
+        if self._use_trinity_runtime(run_config):
+            return _SCRIPTS_DIR / "requirements_trinity.txt"
         return _SCRIPTS_DIR / "requirements.txt"
 
     def generate_remote_config(self, run_config: RunConfig) -> dict:

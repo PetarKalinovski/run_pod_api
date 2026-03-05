@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 from datasets import Dataset, load_dataset
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 from trl import SFTTrainer
 
 try:
@@ -109,6 +109,27 @@ FORMATTERS = {
 }
 
 
+def patch_rope_compat() -> None:
+    """Patch transformers rope helpers for older custom remote-code models."""
+    try:
+        from transformers import modeling_rope_utils as rope_utils
+    except ImportError:
+        return
+
+    rope_init_functions = getattr(rope_utils, "ROPE_INIT_FUNCTIONS", None)
+    if not isinstance(rope_init_functions, dict) or "default" in rope_init_functions:
+        return
+
+    default_fn = getattr(rope_utils, "_compute_default_rope_parameters", None)
+    if callable(default_fn):
+        rope_init_functions["default"] = default_fn
+        return
+
+    if rope_init_functions:
+        # Last-resort fallback for custom model code that expects a "default" entry.
+        rope_init_functions["default"] = next(iter(rope_init_functions.values()))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to JSON config.")
@@ -137,8 +158,16 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    if getattr(model_config, "pad_token_id", None) is None:
+        model_config.pad_token_id = tokenizer.pad_token_id
+    if getattr(model_config, "eos_token_id", None) is None:
+        model_config.eos_token_id = tokenizer.eos_token_id
+    patch_rope_compat()
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
+        config=model_config,
         torch_dtype=torch.bfloat16 if config.get("bf16", True) else torch.float16,
         device_map="auto",
         trust_remote_code=True,

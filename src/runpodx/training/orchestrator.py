@@ -98,7 +98,7 @@ class TrainingOrchestrator:
 
             # Step 4: Upload scripts
             self._console.print("[bold blue]Step 4/6:[/] Uploading training scripts...")
-            self._upload_scripts(method)
+            self._upload_scripts(method, config)
 
             # Step 5: Dataset
             self._console.print("[bold blue]Step 5/6:[/] Preparing dataset...")
@@ -216,13 +216,15 @@ class TrainingOrchestrator:
             time.sleep(interval)
         raise RuntimeError("SSH connection failed after max retries.")
 
-    def _upload_scripts(self, method) -> None:
-        result = self._executor.upload(method.script_path(), f"{REMOTE_WORK_DIR}/train.py")
+    def _upload_scripts(self, method, config: RunConfig) -> None:
+        result = self._executor.upload(
+            method.script_path(config), f"{REMOTE_WORK_DIR}/train.py"
+        )
         if result.returncode != 0:
             raise RuntimeError(f"Script upload failed: {result.stderr}")
 
         result = self._executor.upload(
-            method.requirements_path(), f"{REMOTE_WORK_DIR}/requirements.txt"
+            method.requirements_path(config), f"{REMOTE_WORK_DIR}/requirements.txt"
         )
         if result.returncode != 0:
             raise RuntimeError(f"Requirements upload failed: {result.stderr}")
@@ -387,7 +389,7 @@ class TrainingOrchestrator:
         self._console.print(f"  Epochs:    {config.training.epochs}")
         self._console.print(f"  Batch:     {config.training.batch_size}")
         self._console.print(f"  LR:        {config.training.lr}")
-        self._console.print(f"  Script:    {method.script_path()}")
+        self._console.print(f"  Script:    {method.script_path(config)}")
         if config.run.pod_id:
             self._console.print(f"  Pod:       {config.run.pod_id} (existing)")
         else:

@@ -86,6 +86,17 @@ class TestSFTMethod:
         assert method.script_path().exists()
         assert method.requirements_path().exists()
 
+    def test_trinity_uses_dedicated_script_and_requirements(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="sft", pod_id="pod_abc123"),
+            model=ModelConfig(name="arcee-ai/Trinity-Nano-Base", adapter="full"),
+            dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
+        )
+        method = get_method("sft")
+
+        assert method.script_path(config).name == "sft_train_trinity.py"
+        assert method.requirements_path(config).name == "requirements_trinity.txt"
+
     def test_canonical_format(self):
         method = get_method("sft")
         assert method.canonical_format() == "sft"
