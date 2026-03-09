@@ -11,9 +11,11 @@ from runpodx.training.configs import (
     DatasetConfig,
     ModelConfig,
     MonitoringConfig,
+    OutputConfig,
     PodSpecConfig,
     RunConfig,
     RunMetaConfig,
+    TrainingConfig,
 )
 from runpodx.training.methods import get_method
 from runpodx.training.orchestrator import TrainingOrchestrator
@@ -63,6 +65,10 @@ class TestSFTMethod:
         assert remote_config["learning_rate"] == 2e-5
         assert remote_config["hf_dataset"] == "tatsu-lab/alpaca"
         assert remote_config["wandb_project"] == "test"
+        assert remote_config["append_eos_token"] is True
+        assert remote_config["sanitize_ascii_outputs"] is False
+        assert remote_config["generation_eval_enabled"] is False
+        assert remote_config["convert_to_prompt_completion"] is False
 
     def test_generate_remote_config_with_validation(self):
         config = RunConfig(
@@ -99,6 +105,44 @@ class TestSFTMethod:
 
     def test_canonical_format(self):
         method = get_method("sft")
+        assert method.canonical_format() == "sft"
+
+
+class TestGRPOMethod:
+    def test_generate_remote_config(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="grpo", pod_id="pod_abc123"),
+            model=ModelConfig(
+                name="PetarKal/Qwen3-4B-ascii-art-e5-lr3e-5-ga16-base",
+                adapter="lora",
+            ),
+            dataset=DatasetConfig(
+                source="huggingface",
+                path="AvaLovelace/ASCII-Art",
+                format="sharegpt",
+                validation_ratio=0.1,
+            ),
+            training=TrainingConfig(grpo_profile="ascii_art"),
+        )
+        method = get_method("grpo")
+        remote_config = method.generate_remote_config(config)
+
+        assert remote_config["model_name"] == "PetarKal/Qwen3-4B-ascii-art-e5-lr3e-5-ga16-base"
+        assert remote_config["adapter"] == "lora"
+        assert remote_config["dataset_format"] == "sharegpt"
+        assert remote_config["grpo_profile"] == "ascii_art"
+        assert remote_config["grpo_num_generations"] == 4
+        assert remote_config["grpo_max_completion_length"] == 192
+        assert remote_config["grpo_soft_overlong_cache"] == 32
+        assert remote_config["validation_ratio"] == 0.1
+
+    def test_script_path_exists(self):
+        method = get_method("grpo")
+        assert method.script_path().exists()
+        assert method.requirements_path().exists()
+
+    def test_canonical_format(self):
+        method = get_method("grpo")
         assert method.canonical_format() == "sft"
 
 
@@ -150,6 +194,40 @@ class TestTrainingOrchestrator:
 
         mock_pod_manager.get.assert_called_once_with("pod_abc123")
         assert mock_executor.upload.call_count >= 2  # script + requirements + config
+
+    @patch("runpodx.training.orchestrator.SSHExecutor")
+    @patch("runpodx.training.orchestrator.SSHConnection")
+    def test_deletes_pod_after_successful_hub_push(
+        self, mock_ssh_conn_cls, mock_executor_cls, mock_pod_manager
+    ):
+        config = RunConfig(
+            run=RunMetaConfig(
+                method="sft",
+                pod_id="pod_abc123",
+                terminate_after_hub_push=True,
+            ),
+            model=ModelConfig(name="Qwen/Qwen3-0.6B"),
+            dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
+            output=OutputConfig(push_to_hub=True, hub_model_id="user/model"),
+        )
+        mock_executor = MagicMock()
+        mock_executor.test_connection.return_value = True
+        mock_executor.upload.return_value = MagicMock(returncode=0)
+        mock_executor_cls.return_value = mock_executor
+
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = None
+        mock_proc.returncode = 0
+        mock_executor.run.side_effect = [
+            MagicMock(returncode=0),  # mkdir
+            MagicMock(returncode=0),  # pip install
+            mock_proc,                # training
+        ]
+
+        orchestrator = TrainingOrchestrator(mock_pod_manager)
+        orchestrator.run(config)
+
+        mock_pod_manager.delete.assert_called_once_with("pod_abc123")
 
 
 class TestMethodRegistry:

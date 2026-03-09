@@ -1,0 +1,70 @@
+# GRPO refinement of the best Qwen3-4B ASCII-art SFT checkpoint.
+# Starts from the uploaded SFT model and trains a LoRA policy head with
+# ASCII-specific rewards that penalize loops and reward target similarity.
+
+[run]
+method = "grpo"
+terminate_after_hub_push = true
+
+[pod]
+name = "qwen3-ascii-art-grpo"
+image = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+cloud_type = "SECURE"
+container_disk_gb = 80
+volume_gb = 130
+
+[pod.gpu]
+type_ids = ["NVIDIA RTX A6000"]
+count = 1
+
+[model]
+name = "PetarKal/Qwen3-4B-ascii-art-e5-lr3e-5-ga16-base"
+adapter = "lora"
+lora_r = 16
+lora_alpha = 32
+lora_dropout = 0.05
+
+[dataset]
+source = "huggingface"
+path = "AvaLovelace/ASCII-Art"
+split = "train"
+format = "sharegpt"
+max_samples = 2048
+validation_ratio = 0.1
+validation_seed = 42
+
+[training]
+epochs = 1
+lr = 5e-6
+batch_size = 1
+gradient_accumulation = 16
+grpo_profile = "ascii_art"
+max_seq_length = 4096
+warmup_ratio = 0.05
+weight_decay = 0.0
+bf16 = true
+optimizer = "adamw_8bit"
+logging_steps = 5
+save_steps = 50
+save_total_limit = 3
+sanitize_ascii_outputs = true
+ascii_max_tail_line_repeats = 8
+generation_eval_enabled = true
+generation_eval_max_new_tokens = 256
+grpo_num_generations = 4
+grpo_max_completion_length = 192
+grpo_beta = 0.0
+grpo_temperature = 0.9
+grpo_top_p = 1.0
+grpo_reward_weights = [0.45, 0.75, 1.25, 0.9]
+
+[output]
+save_path = "/workspace/output"
+push_to_hub = true
+hub_model_id = "PetarKal/Qwen3-4B-ascii-art-grpo-from-sft-lora-v1"
+
+[monitoring]
+wandb_project = "qwen3-ascii-art"
+wandb_run_name = "qwen3-4B-grpo-from-sft-lora-lr5e-6-g4"
+wandb_entity = "petar-kalinovski-"
+log_interval = 5

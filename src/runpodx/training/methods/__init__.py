@@ -52,4 +52,5 @@ class BaseMethod(ABC):
 
 
 # Import concrete methods so decorators fire
+from runpodx.training.methods import grpo as _grpo  # noqa: E402, F401
 from runpodx.training.methods import sft as _sft  # noqa: E402, F401
