@@ -126,8 +126,13 @@ class TrainingOrchestrator:
                 self._download_output(config)
 
             # Post-training: terminate pod
-            if config.run.terminate_on_complete:
-                self._console.print(f"[bold yellow]Terminating pod {pod.id}...[/]")
+            if self._should_terminate_pod(config):
+                terminate_reason = "successful completion"
+                if config.run.terminate_after_hub_push:
+                    terminate_reason = "successful Hub push"
+                self._console.print(
+                    f"[bold yellow]Terminating pod {pod.id} after {terminate_reason}...[/]"
+                )
                 self._pods.delete(pod.id)
                 self._console.print(f"  [red]Pod {pod.id} deleted.[/]")
 
@@ -164,6 +169,11 @@ class TrainingOrchestrator:
         self._created_pod = True
         self._console.print(f"  [green]Created pod:[/] {pod.id}")
         return pod
+
+    def _should_terminate_pod(self, config: RunConfig) -> bool:
+        if config.run.terminate_after_hub_push:
+            return config.output.push_to_hub
+        return config.run.terminate_on_complete
 
     def _build_env_vars(self, config: RunConfig) -> dict[str, str]:
         env: dict[str, str] = {}
@@ -217,9 +227,8 @@ class TrainingOrchestrator:
         raise RuntimeError("SSH connection failed after max retries.")
 
     def _upload_scripts(self, method, config: RunConfig) -> None:
-        result = self._executor.upload(
-            method.script_path(config), f"{REMOTE_WORK_DIR}/train.py"
-        )
+        script_path = method.script_path(config)
+        result = self._executor.upload(script_path, f"{REMOTE_WORK_DIR}/train.py")
         if result.returncode != 0:
             raise RuntimeError(f"Script upload failed: {result.stderr}")
 
@@ -228,6 +237,17 @@ class TrainingOrchestrator:
         )
         if result.returncode != 0:
             raise RuntimeError(f"Requirements upload failed: {result.stderr}")
+
+        for support_file in script_path.parent.glob("*.py"):
+            if support_file == script_path:
+                continue
+            result = self._executor.upload(
+                support_file, f"{REMOTE_WORK_DIR}/{support_file.name}"
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Support file upload failed ({support_file.name}): {result.stderr}"
+                )
 
     def _prepare_and_upload_dataset(self, config: RunConfig, method) -> None:
         dataset_config = config.dataset
@@ -403,4 +423,8 @@ class TrainingOrchestrator:
         )
         self._console.print(
             f"  Terminate: {'yes' if config.run.terminate_on_complete else 'no'}"
+        )
+        self._console.print(
+            "  Hub cleanup: "
+            f"{'yes' if config.run.terminate_after_hub_push else 'no'}"
         )

@@ -4,6 +4,7 @@
 
 [run]
 method = "sft"
+terminate_after_hub_push = true
 
 [pod]
 name = "qwen3-ascii-art-sft"

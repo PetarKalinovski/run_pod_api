@@ -23,6 +23,15 @@ class RunMetaConfig(BaseConfig):
         bool,
         Field(description="Delete the pod after training completes successfully."),
     ] = False
+    terminate_after_hub_push: Annotated[
+        bool,
+        Field(
+            description=(
+                "Delete the pod after a successful training run that pushes the "
+                "model to HuggingFace Hub."
+            ),
+        ),
+    ] = False
     download_on_complete: Annotated[
         str | None,
         Field(
@@ -144,6 +153,82 @@ class TrainingConfig(BaseConfig):
     logging_steps: Annotated[int, Field(ge=1, description="Log every N steps.")] = 10
     save_steps: Annotated[int, Field(ge=1, description="Save checkpoint every N steps.")] = 500
     save_total_limit: Annotated[int | None, Field(ge=1, description="Max checkpoints.")] = 3
+    append_eos_token: Annotated[
+        bool,
+        Field(description="Append EOS to each assistant/response target during SFT."),
+    ] = True
+    sanitize_ascii_outputs: Annotated[
+        bool,
+        Field(description="Trim pathological repeated tail lines in ASCII-art targets."),
+    ] = False
+    ascii_max_tail_line_repeats: Annotated[
+        int | None,
+        Field(ge=1, description="Max repeated copies allowed for the final output line."),
+    ] = None
+    generation_eval_enabled: Annotated[
+        bool,
+        Field(description="Run a prompt-based generation benchmark after training."),
+    ] = False
+    generation_eval_max_new_tokens: Annotated[
+        int,
+        Field(ge=1, description="Max new tokens to generate for the benchmark prompts."),
+    ] = 384
+    generation_eval_prompts: Annotated[
+        list[str] | None,
+        Field(description="Optional prompt list for the post-training generation benchmark."),
+    ] = None
+    convert_to_prompt_completion: Annotated[
+        bool,
+        Field(
+            description=(
+                "Convert the loaded dataset into prompt/completion pairs and train "
+                "only on the completion tokens when supported by TRL."
+            ),
+        ),
+    ] = False
+    grpo_num_generations: Annotated[
+        int,
+        Field(ge=2, description="Number of sampled completions per prompt for GRPO."),
+    ] = 4
+    grpo_max_completion_length: Annotated[
+        int,
+        Field(ge=1, description="Maximum generated completion length for GRPO rollouts."),
+    ] = 192
+    grpo_soft_overlong_cache: Annotated[
+        int,
+        Field(
+            ge=0,
+            description=(
+                "Token window near the GRPO completion cap where a soft overlong "
+                "penalty starts to apply."
+            ),
+        ),
+    ] = 32
+    grpo_beta: Annotated[
+        float,
+        Field(ge=0.0, description="KL regularization coefficient for GRPO."),
+    ] = 0.0
+    grpo_temperature: Annotated[
+        float,
+        Field(gt=0.0, description="Sampling temperature for GRPO rollouts."),
+    ] = 1.0
+    grpo_top_p: Annotated[
+        float,
+        Field(gt=0.0, le=1.0, description="Top-p sampling value for GRPO rollouts."),
+    ] = 1.0
+    grpo_reward_weights: Annotated[
+        list[float] | None,
+        Field(description="Optional reward weights for the GRPO ASCII reward functions."),
+    ] = None
+    grpo_profile: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Named GRPO profile or import path that supplies reward functions "
+                "and dataset preparation for a GRPO run."
+            ),
+        ),
+    ] = None
 
 
 class OutputConfig(BaseConfig):
@@ -202,4 +287,10 @@ class RunConfig(BaseConfig):
                 "Either run.pod_id must be set (existing pod) "
                 "or [pod] section must be provided (create new pod)."
             )
+        if self.run.terminate_after_hub_push and not self.output.push_to_hub:
+            raise ValueError(
+                "run.terminate_after_hub_push requires output.push_to_hub = true."
+            )
+        if self.run.method == "grpo" and not self.training.grpo_profile:
+            raise ValueError("training.grpo_profile is required when run.method = 'grpo'.")
         return self

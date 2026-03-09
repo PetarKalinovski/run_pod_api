@@ -1,9 +1,10 @@
-﻿# Full SFT of Qwen3-4B on ASCII art (human-crafted, 5.3k samples)
+# Full SFT of Qwen3-4B on ASCII art (human-crafted, 5.3k samples)
 # Usage: runpodx run examples/ascii_art_sft.toml
 #        runpodx run examples/ascii_art_sft.toml --dry-run
 
 [run]
 method = "sft"
+terminate_after_hub_push = true
 
 [pod]
 name = "qwen3-ascii-art-sft"
@@ -39,6 +40,12 @@ optimizer = "adamw_8bit"
 logging_steps = 5
 save_steps = 100
 save_total_limit = 3
+append_eos_token = true
+sanitize_ascii_outputs = true
+ascii_max_tail_line_repeats = 8
+generation_eval_enabled = true
+generation_eval_max_new_tokens = 384
+convert_to_prompt_completion = true
 
 [output]
 save_path = "/workspace/output"

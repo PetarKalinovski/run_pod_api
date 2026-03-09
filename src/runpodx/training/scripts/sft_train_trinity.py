@@ -13,6 +13,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -20,6 +21,29 @@ from datasets import Dataset, load_dataset
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 from trl import SFTTrainer
+
+try:
+    from sft_shared import (
+        DEFAULT_ASCII_BENCHMARK_PROMPTS,
+        analyze_ascii_response,
+        build_generation_prompt,
+        convert_dataset_to_prompt_completion,
+        format_alpaca_example,
+        format_sharegpt_example,
+        resolve_wandb_run_id,
+        summarize_generation_benchmark,
+    )
+except ImportError:
+    from runpodx.training.scripts.sft_shared import (
+        DEFAULT_ASCII_BENCHMARK_PROMPTS,
+        analyze_ascii_response,
+        build_generation_prompt,
+        convert_dataset_to_prompt_completion,
+        format_alpaca_example,
+        format_sharegpt_example,
+        resolve_wandb_run_id,
+        summarize_generation_benchmark,
+    )
 
 try:
     from trl import SFTConfig
@@ -64,50 +88,155 @@ def load_sft_dataset(config: dict) -> tuple[Dataset, Dataset | None]:
 
 def build_training_args(config_cls, common_args: dict, eval_enabled: bool):
     """Build TrainingArguments/SFTConfig with version-compatible eval kwargs."""
-    eval_key = "eval_strategy"
+    base_args = dict(common_args)
     if eval_enabled:
-        common_args[eval_key] = "epoch"
+        base_args["eval_strategy"] = "epoch"
 
-    try:
-        return config_cls(**common_args)
-    except TypeError as exc:
-        if eval_enabled and "eval_strategy" in common_args:
-            legacy_args = dict(common_args)
-            legacy_args["evaluation_strategy"] = legacy_args.pop("eval_strategy")
-            return config_cls(**legacy_args)
-        raise exc
+    optional_keys = ("completion_only_loss", "assistant_only_loss")
+    candidates = [base_args]
+    if eval_enabled:
+        legacy_args = dict(base_args)
+        legacy_args["evaluation_strategy"] = legacy_args.pop("eval_strategy")
+        candidates.append(legacy_args)
+
+    last_exc = None
+    seen: set[tuple[str, ...]] = set()
+    queue = list(candidates)
+    while queue:
+        candidate = queue.pop(0)
+        key = tuple(sorted(candidate.keys()))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            return config_cls(**candidate)
+        except TypeError as exc:
+            last_exc = exc
+            for optional_key in optional_keys:
+                if optional_key in candidate:
+                    trimmed = dict(candidate)
+                    trimmed.pop(optional_key)
+                    queue.append(trimmed)
+
+    raise last_exc
 
 
-def format_alpaca(example: dict) -> str:
-    """Format an alpaca-style example (instruction/input/output)."""
-    instruction = example.get("instruction", "")
-    inp = example.get("input", "")
-    output = example.get("output", "")
+def build_formatting_func(dataset_format: str, tokenizer, config: dict):
+    formatter_kwargs = {
+        "eos_token": tokenizer.eos_token or "",
+        "append_eos": config.get("append_eos_token", True),
+        "sanitize_ascii": config.get("sanitize_ascii_outputs", False),
+        "max_tail_line_repeats": config.get("ascii_max_tail_line_repeats"),
+    }
+    formatters = {
+        "alpaca": partial(format_alpaca_example, **formatter_kwargs),
+        "sharegpt": partial(format_sharegpt_example, **formatter_kwargs),
+    }
+    return formatters.get(dataset_format), list(formatters.keys())
 
-    if inp:
-        return (
-            f"### Instruction:\n{instruction}\n\n"
-            f"### Input:\n{inp}\n\n"
-            f"### Response:\n{output}"
+
+def maybe_convert_datasets_to_prompt_completion(
+    train_dataset: Dataset,
+    eval_dataset: Dataset | None,
+    dataset_format: str,
+    tokenizer,
+    config: dict,
+) -> tuple[Dataset, Dataset | None, str]:
+    if not config.get("convert_to_prompt_completion"):
+        return train_dataset, eval_dataset, dataset_format
+
+    converter_kwargs = {
+        "source_format": dataset_format,
+        "eos_token": tokenizer.eos_token or "",
+        "append_eos": config.get("append_eos_token", True),
+        "sanitize_ascii": config.get("sanitize_ascii_outputs", False),
+        "max_tail_line_repeats": config.get("ascii_max_tail_line_repeats"),
+    }
+    original_train_size = len(train_dataset)
+    train_dataset = convert_dataset_to_prompt_completion(train_dataset, **converter_kwargs)
+    print(
+        "[runpodx] Converted train dataset to prompt/completion: "
+        f"{original_train_size} -> {len(train_dataset)}"
+    )
+
+    if eval_dataset is not None:
+        original_eval_size = len(eval_dataset)
+        eval_dataset = convert_dataset_to_prompt_completion(eval_dataset, **converter_kwargs)
+        print(
+            "[runpodx] Converted validation dataset to prompt/completion: "
+            f"{original_eval_size} -> {len(eval_dataset)}"
         )
-    return f"### Instruction:\n{instruction}\n\n### Response:\n{output}"
+
+    return train_dataset, eval_dataset, "prompt_completion"
 
 
-def format_sharegpt(example: dict) -> str:
-    """Format a sharegpt/messages-style example into a prompt string."""
-    messages = example.get("messages") or example.get("conversations") or []
-    parts = []
-    for msg in messages:
-        role = msg.get("role", "user").capitalize()
-        content = msg.get("content", "")
-        parts.append(f"### {role}:\n{content}")
-    return "\n\n".join(parts)
+def run_generation_benchmark(model, tokenizer, dataset_format: str, config: dict, report_to: str):
+    prompts = config.get("generation_eval_prompts") or DEFAULT_ASCII_BENCHMARK_PROMPTS
+    if not config.get("generation_eval_enabled") and not config.get("generation_eval_prompts"):
+        return None
 
+    print("[runpodx] Running generation benchmark...")
+    benchmark_rows = []
+    prompt_device = next(model.parameters()).device
+    max_new_tokens = config.get("generation_eval_max_new_tokens", 384)
 
-FORMATTERS = {
-    "alpaca": format_alpaca,
-    "sharegpt": format_sharegpt,
-}
+    for prompt in prompts:
+        rendered_prompt = build_generation_prompt(prompt, dataset_format)
+        tokenized = tokenizer(rendered_prompt, return_tensors="pt")
+        tokenized = {key: value.to(prompt_device) for key, value in tokenized.items()}
+        with torch.no_grad():
+            generated = model.generate(
+                **tokenized,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+
+        generated_ids = generated[0][tokenized["input_ids"].shape[1]:]
+        response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        row = {
+            "prompt": prompt,
+            "response": response,
+            "terminated_on_eos": int(tokenizer.eos_token_id in generated_ids.tolist()),
+        }
+        row.update(analyze_ascii_response(response))
+        benchmark_rows.append(row)
+
+    aggregate = summarize_generation_benchmark(benchmark_rows)
+    print(f"[runpodx] Generation benchmark aggregate: {json.dumps(aggregate, indent=2)}")
+
+    if report_to == "wandb":
+        try:
+            import wandb
+
+            wandb.log({f"benchmark/{key}": value for key, value in aggregate.items()})
+            table = wandb.Table(
+                columns=[
+                    "prompt",
+                    "response",
+                    "line_count",
+                    "repeat_line_fraction",
+                    "max_consecutive_repeat",
+                    "tail_repeat_count",
+                    "terminated_on_eos",
+                ]
+            )
+            for row in benchmark_rows:
+                table.add_data(
+                    row["prompt"],
+                    row["response"],
+                    row["line_count"],
+                    row["repeat_line_fraction"],
+                    row["max_consecutive_repeat"],
+                    row["tail_repeat_count"],
+                    row["terminated_on_eos"],
+                )
+            wandb.log({"benchmark/samples": table})
+        except Exception as exc:
+            print(f"[runpodx] W&B benchmark logging skipped: {exc}")
+
+    return {"aggregate": aggregate, "rows": benchmark_rows}
 
 
 def patch_rope_compat() -> None:
@@ -222,9 +351,23 @@ def main():
     # --- W&B setup ---
     wandb_project = config.get("wandb_project")
     if wandb_project:
+        import wandb
+
         os.environ["WANDB_PROJECT"] = wandb_project
         if config.get("wandb_entity"):
             os.environ["WANDB_ENTITY"] = config["wandb_entity"]
+        run_id, resume_mode = resolve_wandb_run_id(
+            config.get("output_dir", "/workspace/output"),
+            resume_from_checkpoint=config.get("resume_from_checkpoint"),
+            generate_id=wandb.util.generate_id,
+        )
+        os.environ["WANDB_RUN_ID"] = run_id
+        if resume_mode:
+            os.environ["WANDB_RESUME"] = resume_mode
+            print(f"[runpodx] Resuming W&B run id: {run_id}")
+        else:
+            os.environ.pop("WANDB_RESUME", None)
+            print(f"[runpodx] Using W&B run id: {run_id}")
         report_to = "wandb"
         run_name = config.get("wandb_run_name") or None
     else:
@@ -280,6 +423,14 @@ def main():
     print(f"[runpodx] Train dataset size: {len(train_dataset)}")
     if eval_dataset is not None:
         print(f"[runpodx] Validation dataset size: {len(eval_dataset)}")
+    dataset_format = config.get("dataset_format", "alpaca")
+    train_dataset, eval_dataset, training_dataset_format = maybe_convert_datasets_to_prompt_completion(
+        train_dataset,
+        eval_dataset,
+        dataset_format,
+        tokenizer,
+        config,
+    )
 
     # --- Training args ---
     common_args = dict(
@@ -305,6 +456,8 @@ def main():
         gradient_checkpointing=True,
         remove_unused_columns=False,
     )
+    if config.get("convert_to_prompt_completion"):
+        common_args["completion_only_loss"] = True
 
     # trl >= 0.15: SFTConfig has max_seq_length; older: use TrainingArguments
     max_seq = config.get("max_seq_length", 2048)
@@ -330,21 +483,30 @@ def main():
         )
 
     # --- Train ---
-    dataset_format = config.get("dataset_format", "alpaca")
-    formatting_func = FORMATTERS.get(dataset_format)
-    if formatting_func is None:
-        print(f"[runpodx] ERROR: Unknown dataset_format '{dataset_format}'. "
-              f"Available: {list(FORMATTERS.keys())}", file=sys.stderr)
-        sys.exit(1)
-    print(f"[runpodx] Using formatter: {dataset_format}")
+    formatting_func = None
+    if training_dataset_format != "prompt_completion":
+        formatting_func, available_formatters = build_formatting_func(
+            training_dataset_format, tokenizer, config
+        )
+        if formatting_func is None:
+            print(
+                f"[runpodx] ERROR: Unknown dataset_format '{training_dataset_format}'. "
+                f"Available: {available_formatters}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"[runpodx] Using formatter: {training_dataset_format}")
+    else:
+        print("[runpodx] Using prompt/completion dataset representation")
 
     trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         processing_class=tokenizer,
-        formatting_func=formatting_func,
     )
+    if formatting_func is not None:
+        trainer_kwargs["formatting_func"] = formatting_func
     if eval_dataset is not None:
         trainer_kwargs["eval_dataset"] = eval_dataset
     if max_seq is not None:
@@ -378,6 +540,8 @@ def main():
         print("[runpodx] Running final validation...")
         metrics = trainer.evaluate()
         print(f"[runpodx] Validation metrics: {metrics}")
+
+    run_generation_benchmark(model, tokenizer, training_dataset_format, config, report_to)
 
     # --- Save ---
     print("[runpodx] Saving model...")

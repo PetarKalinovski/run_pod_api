@@ -23,6 +23,10 @@ class TestRunMetaConfig:
         config = RunMetaConfig(method="sft")
         assert config.method == "sft"
 
+    def test_hub_cleanup_defaults_to_disabled(self):
+        config = RunMetaConfig(method="sft")
+        assert config.terminate_after_hub_push is False
+
     def test_invalid_method(self):
         with pytest.raises(Exception):
             RunMetaConfig(method="invalid")
@@ -87,6 +91,15 @@ class TestTrainingConfig:
         assert config.epochs == 3
         assert config.lr == 2e-5
         assert config.bf16 is True
+        assert config.append_eos_token is True
+        assert config.sanitize_ascii_outputs is False
+        assert config.generation_eval_enabled is False
+        assert config.convert_to_prompt_completion is False
+        assert config.grpo_num_generations == 4
+        assert config.grpo_max_completion_length == 192
+        assert config.grpo_soft_overlong_cache == 32
+        assert config.grpo_beta == 0.0
+        assert config.grpo_profile is None
 
 
 class TestRunConfig:
@@ -116,6 +129,41 @@ class TestRunConfig:
                 model=ModelConfig(name="Qwen/Qwen3-0.6B"),
                 dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
             )
+
+    def test_hub_cleanup_requires_push_to_hub(self):
+        with pytest.raises(Exception, match="terminate_after_hub_push"):
+            RunConfig(
+                run=RunMetaConfig(method="sft", pod_id="pod_123", terminate_after_hub_push=True),
+                model=ModelConfig(name="Qwen/Qwen3-0.6B"),
+                dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
+            )
+
+    def test_hub_cleanup_allowed_when_push_to_hub_enabled(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="sft", pod_id="pod_123", terminate_after_hub_push=True),
+            model=ModelConfig(name="Qwen/Qwen3-0.6B"),
+            dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
+            output=OutputConfig(push_to_hub=True, hub_model_id="user/model"),
+        )
+        assert config.run.terminate_after_hub_push is True
+        assert config.output.push_to_hub is True
+
+    def test_grpo_requires_profile(self):
+        with pytest.raises(Exception, match="grpo_profile"):
+            RunConfig(
+                run=RunMetaConfig(method="grpo", pod_id="pod_123"),
+                model=ModelConfig(name="Qwen/Qwen3-0.6B"),
+                dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
+            )
+
+    def test_grpo_accepts_profile(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="grpo", pod_id="pod_123"),
+            model=ModelConfig(name="Qwen/Qwen3-0.6B"),
+            dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
+            training=TrainingConfig(grpo_profile="ascii_art"),
+        )
+        assert config.training.grpo_profile == "ascii_art"
 
     def test_load_from_toml(self):
         toml_content = b"""
