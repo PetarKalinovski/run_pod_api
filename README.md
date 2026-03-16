@@ -162,6 +162,56 @@ wandb_run_name = "qwen3-8b-full-sft"  # Name for this run in W&B
 runpodx run ascii_art_sft.toml
 ```
 
+### GRPO Example
+
+```toml
+# ascii_art_grpo.toml
+
+[run]
+method = "grpo"
+terminate_after_hub_push = true          # Delete pod after pushing model to Hub
+
+[pod]
+image = "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
+
+[pod.gpu]
+type_ids = ["NVIDIA RTX A6000"]
+count = 1
+
+[model]
+name = "PetarKal/Qwen3-4B-ascii-art-sft"  # Start from an SFT checkpoint
+adapter = "lora"
+
+[dataset]
+source = "huggingface"
+path = "AvaLovelace/ASCII-Art"
+format = "sharegpt"
+max_samples = 2048
+validation_ratio = 0.1
+
+[training]
+epochs = 1
+lr = 1e-5
+batch_size = 1
+gradient_accumulation = 16
+grpo_profile = "ascii_art"               # Reward function profile (required for GRPO)
+grpo_num_generations = 4                 # Completions sampled per prompt
+grpo_max_completion_length = 192         # Max tokens per completion
+grpo_beta = 0.05                         # KL regularization
+grpo_temperature = 0.9                   # Sampling temperature
+grpo_reward_weights = [0.45, 0.75, 1.25, 0.9]  # Per-reward-function weights
+sanitize_ascii_outputs = true
+generation_eval_enabled = true           # Run generation benchmark after training
+
+[output]
+push_to_hub = true
+hub_model_id = "your-username/Qwen3-4B-ascii-art-grpo"
+```
+
+```bash
+runpodx run ascii_art_grpo.toml
+```
+
 ---
 
 ## Training Configuration Reference
@@ -175,6 +225,7 @@ A training config is a single TOML file with these sections:
 | `method` | string | **required** | Training method. One of: `"sft"`, `"grpo"`, `"unsloth_grpo"` |
 | `pod_id` | string | `null` | ID of an existing pod to use. Omit to create a new pod from the `[pod]` section |
 | `terminate_on_complete` | bool | `false` | Delete the pod after training completes successfully. Saves money by auto-cleaning up |
+| `terminate_after_hub_push` | bool | `false` | Delete the pod after a successful training run that pushes the model to HuggingFace Hub. Requires `output.push_to_hub = true` |
 | `download_on_complete` | string | `null` | Local directory to download the trained model to after training. Downloads from `[output].save_path`. `null` = skip download |
 
 ### `[pod]` — Pod Provisioning
@@ -223,6 +274,8 @@ Only used when `run.pod_id` is not set. Defines the GPU pod to create.
 | `split` | string | `"train"` | Dataset split to use |
 | `format` | string | `"alpaca"` | Input data format. Determines how records are converted for training. See [Dataset Formats](#dataset-formats) below |
 | `max_samples` | int | `null` (all) | Limit the number of training samples. Useful for testing |
+| `validation_ratio` | float | `null` | Fraction of samples reserved for validation (0.0–1.0 exclusive). `null` disables eval |
+| `validation_seed` | int | `42` | Random seed used when splitting train/validation |
 | `field_mapping` | dict | `null` | Field mapping for `format = "custom"`. Maps your field names to `instruction`, `input`, `output` |
 
 ### `[training]` — Hyperparameters
@@ -243,6 +296,28 @@ Only used when `run.pod_id` is not set. Defines the GPU pod to create.
 | `logging_steps` | int | `10` | Log training metrics (loss, lr, etc.) every N steps |
 | `save_steps` | int | `500` | Save a checkpoint every N steps |
 | `save_total_limit` | int | `3` | Maximum number of checkpoints to keep. Oldest are deleted first |
+| `append_eos_token` | bool | `true` | Append EOS token to each assistant/response target during SFT |
+| `convert_to_prompt_completion` | bool | `false` | Convert dataset into prompt/completion pairs and train only on completion tokens (when supported by TRL) |
+| `sanitize_ascii_outputs` | bool | `false` | Trim pathological repeated tail lines in ASCII-art targets |
+| `ascii_max_tail_line_repeats` | int | `null` | Max repeated copies allowed for the final output line. `null` = no limit |
+| `generation_eval_enabled` | bool | `false` | Run a prompt-based generation benchmark after training |
+| `generation_eval_max_new_tokens` | int | `384` | Max new tokens to generate for benchmark prompts |
+| `generation_eval_prompts` | list[string] | `null` | Custom prompt list for the post-training generation benchmark. `null` = use defaults |
+
+#### GRPO-Specific Options
+
+These options only apply when `run.method = "grpo"` or `"unsloth_grpo"`.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `grpo_profile` | string | `null` | **Required for GRPO.** Named profile or import path that supplies reward functions and dataset prep. Example: `"ascii_art"` |
+| `grpo_num_generations` | int | `4` | Number of sampled completions per prompt for GRPO |
+| `grpo_max_completion_length` | int | `192` | Maximum generated completion length for GRPO rollouts |
+| `grpo_soft_overlong_cache` | int | `32` | Token window near the completion cap where a soft overlong penalty starts |
+| `grpo_beta` | float | `0.0` | KL regularization coefficient for GRPO. `0.0` = no KL penalty |
+| `grpo_temperature` | float | `1.0` | Sampling temperature for GRPO rollouts |
+| `grpo_top_p` | float | `1.0` | Top-p (nucleus) sampling value for GRPO rollouts |
+| `grpo_reward_weights` | list[float] | `null` | Optional reward weights for the GRPO reward functions. Length must match the number of reward functions in the profile |
 
 ### `[output]` — Model Output
 
@@ -313,7 +388,28 @@ For `runpodx pods create`, use a standalone pod config TOML:
 | `docker_start_cmd` | list[string] | `[]` | Override container CMD / start command |
 | `container_registry_auth_id` | string | `null` | Registry credentials ID for private Docker images |
 
-Plus `[gpu]`, `[storage]`, `[networking]`, and `[env]` subsections — same options as in the training config.
+### `[gpu]` — GPU Hardware
+
+Same as `[pod.gpu]` in the training config.
+
+### `[storage]` — Disk & Volumes
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `container_disk_gb` | int | `50` | Ephemeral container disk in GB |
+| `volume_gb` | int | `20` | Persistent pod volume in GB |
+| `volume_mount_path` | string | `"/workspace"` | Filesystem path where volumes are mounted |
+| `network_volume_id` | string | `null` | Attach an existing network volume by its ID |
+
+### `[networking]` — Network & Ports
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `ports` | list[string] | `["8888/http", "22/tcp"]` | Exposed ports, e.g. `["8888/http", "22/tcp", "6006/http"]` |
+| `support_public_ip` | bool | `null` | Require a public IP (Community Cloud). **Must be `true` for SSH to work via REST API** |
+| `data_center_ids` | list[string] | `null` | Preferred data center IDs, e.g. `["US-TX-3", "EU-RO-1"]` |
+| `data_center_priority` | string | `"availability"` | `"availability"` or `"custom"` (respect exact order of `data_center_ids`) |
+| `country_codes` | list[string] | `null` | Restrict deployment to specific countries |
 
 ### `[env]` — Environment Variables
 
@@ -322,6 +418,33 @@ Plus `[gpu]`, `[storage]`, `[networking]`, and `[env]` subsections — same opti
 MY_VAR = "value"
 CUDA_VISIBLE_DEVICES = "0,1"
 ```
+
+---
+
+## Endpoint Configuration Reference
+
+For creating serverless endpoints via the SDK.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `name` | string | **required** | Endpoint name |
+| `template_id` | string | **required** | Template ID to use |
+| `gpu_ids` | string | **required** | GPU type ID string |
+| `workers_min` | int | `0` | Minimum active workers |
+| `workers_max` | int | `3` | Maximum active workers |
+| `idle_timeout` | int | `5` | Seconds before idle workers scale down |
+| `flash_boot` | bool | `true` | Enable flash boot for faster cold starts |
+| `scaling_type` | string | `null` | Scaling strategy (e.g. `"QUEUE_DELAY"`) |
+
+## Network Volume Configuration Reference
+
+For `runpodx volumes create`:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `name` | string | **required** | Volume name |
+| `size_gb` | int | **required** | Volume size in GB (1–4000) |
+| `data_center_id` | string | **required** | Data center ID for the volume (e.g. `"US-TX-3"`) |
 
 ---
 
