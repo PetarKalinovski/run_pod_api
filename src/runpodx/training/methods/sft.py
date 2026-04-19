@@ -28,8 +28,15 @@ class SFTMethod(BaseMethod):
             return _SCRIPTS_DIR / "requirements_trinity.txt"
         return _SCRIPTS_DIR / "requirements.txt"
 
+    def preinstall_commands(self, run_config: RunConfig | None = None) -> list[str]:
+        if self._use_trinity_runtime(run_config):
+            return []
+        return ["pip install 'torch>=2.6.0,<2.11'"]
+
     def generate_remote_config(self, run_config: RunConfig) -> dict:
         """Flatten RunConfig into the JSON format the SFT script expects."""
+        if run_config.model is None or run_config.dataset is None:
+            raise ValueError("SFT runs require model and dataset config.")
         m = run_config.model
         d = run_config.dataset
         t = run_config.training
@@ -66,6 +73,7 @@ class SFTMethod(BaseMethod):
             "generation_eval_max_new_tokens": t.generation_eval_max_new_tokens,
             "generation_eval_prompts": t.generation_eval_prompts,
             "convert_to_prompt_completion": t.convert_to_prompt_completion,
+            "profile_config": t.profile_config,
             "output_dir": o.save_path,
             "push_to_hub": o.push_to_hub,
             "hub_model_id": o.hub_model_id,

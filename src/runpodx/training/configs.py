@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -12,7 +12,7 @@ class RunMetaConfig(BaseConfig):
     """Top-level run metadata."""
 
     method: Annotated[
-        Literal["sft", "grpo", "unsloth_grpo"],
+        Literal["sft", "grpo", "unsloth_grpo", "script"],
         Field(description="Training method to use."),
     ]
     pod_id: Annotated[
@@ -112,14 +112,22 @@ class DatasetConfig(BaseConfig):
     max_samples: Annotated[int | None, Field(ge=1, description="Limit dataset size.")] = None
     validation_split: Annotated[
         str | None,
-        Field(description="HF split name for a pre-built validation set (e.g. 'validation'). Takes precedence over validation_ratio."),
+        Field(
+            description=(
+                "HF split name for a pre-built validation set. Takes precedence "
+                "over validation_ratio."
+            ),
+        ),
     ] = None
     validation_ratio: Annotated[
         float | None,
         Field(
             gt=0.0,
             lt=1.0,
-            description="Fraction of samples reserved for validation. None disables eval. Ignored if validation_split is set.",
+            description=(
+                "Fraction of samples reserved for validation. None disables eval. "
+                "Ignored if validation_split is set."
+            ),
         ),
     ] = None
     validation_seed: Annotated[
@@ -162,18 +170,32 @@ class TrainingConfig(BaseConfig):
     logging_steps: Annotated[int, Field(ge=1, description="Log every N steps.")] = 10
     save_steps: Annotated[int, Field(ge=1, description="Save checkpoint every N steps.")] = 500
     save_total_limit: Annotated[int | None, Field(ge=1, description="Max checkpoints.")] = 3
-    eval_steps: Annotated[int | None, Field(ge=1, description="Eval every N steps. If set, overrides per-epoch eval.")] = None
+    eval_steps: Annotated[
+        int | None,
+        Field(ge=1, description="Eval every N steps. If set, overrides per-epoch eval."),
+    ] = None
     append_eos_token: Annotated[
         bool,
         Field(description="Append EOS to each assistant/response target during SFT."),
     ] = True
     sanitize_ascii_outputs: Annotated[
         bool,
-        Field(description="Trim pathological repeated tail lines in ASCII-art targets."),
+        Field(
+            description=(
+                "Deprecated. Use training.profile_config.sanitize_outputs for "
+                "ASCII-specific cleanup."
+            ),
+        ),
     ] = False
     ascii_max_tail_line_repeats: Annotated[
         int | None,
-        Field(ge=1, description="Max repeated copies allowed for the final output line."),
+        Field(
+            ge=1,
+            description=(
+                "Deprecated. Use training.profile_config.max_tail_line_repeats "
+                "for ASCII-specific cleanup."
+            ),
+        ),
     ] = None
     neftune_noise_alpha: Annotated[
         float | None,
@@ -230,9 +252,25 @@ class TrainingConfig(BaseConfig):
         float,
         Field(gt=0.0, le=1.0, description="Top-p sampling value for GRPO rollouts."),
     ] = 1.0
+    grpo_rewards: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Optional profile-specific reward names to enable for GRPO. "
+                "When omitted, the profile chooses its defaults."
+            ),
+        ),
+    ] = None
+    profile_config: Annotated[
+        dict[str, Any],
+        Field(
+            default_factory=dict,
+            description="Method/profile-specific options passed through to the remote runner.",
+        ),
+    ]
     grpo_reward_weights: Annotated[
         list[float] | None,
-        Field(description="Optional reward weights for the GRPO ASCII reward functions."),
+        Field(description="Optional reward weights for the enabled GRPO reward functions."),
     ] = None
     grpo_profile: Annotated[
         str | None,
@@ -245,8 +283,50 @@ class TrainingConfig(BaseConfig):
     ] = None
     grpo_clip_reward: Annotated[
         bool,
-        Field(description="Enable CLIP visual reward for ASCII art GRPO. Adds a 6th reward function."),
+        Field(
+            description=(
+                "Deprecated ASCII profile shortcut. Prefer "
+                "grpo_rewards = ['...', 'clip_visual']."
+            ),
+        ),
     ] = False
+
+
+class ScriptConfig(BaseConfig):
+    """Generic script execution configuration."""
+
+    entrypoint: Annotated[
+        str | None,
+        Field(description="Local script file to upload and execute on the pod."),
+    ] = None
+    command: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Remote command to run. Supports {remote_work_dir}, {script_path}, "
+                "and {config_path} placeholders."
+            ),
+        ),
+    ] = None
+    requirements: Annotated[
+        str | None,
+        Field(description="Optional local requirements.txt to install on the pod."),
+    ] = None
+    uploads: Annotated[
+        list[str],
+        Field(default_factory=list, description="Extra local files to upload next to the script."),
+    ]
+    preinstall_commands: Annotated[
+        list[str],
+        Field(default_factory=list, description="Commands to run before installing requirements."),
+    ]
+    config: Annotated[
+        dict[str, Any],
+        Field(
+            default_factory=dict,
+            description="JSON payload written to config.json for the script.",
+        ),
+    ]
 
 
 class OutputConfig(BaseConfig):
@@ -287,11 +367,15 @@ class RunConfig(BaseConfig):
         PodSpecConfig | None,
         Field(description="Pod spec. Ignored if run.pod_id is set."),
     ] = None
-    model: Annotated[ModelConfig, Field(description="Model configuration.")]
-    dataset: Annotated[DatasetConfig, Field(description="Dataset configuration.")]
+    model: Annotated[ModelConfig | None, Field(description="Model configuration.")] = None
+    dataset: Annotated[DatasetConfig | None, Field(description="Dataset configuration.")] = None
     training: Annotated[
         TrainingConfig, Field(description="Training hyperparameters.")
     ] = TrainingConfig()
+    script: Annotated[
+        ScriptConfig,
+        Field(description="Generic script execution settings."),
+    ] = ScriptConfig()
     output: Annotated[OutputConfig, Field(description="Output configuration.")] = OutputConfig()
     monitoring: Annotated[
         MonitoringConfig, Field(description="W&B monitoring.")
@@ -309,6 +393,12 @@ class RunConfig(BaseConfig):
             raise ValueError(
                 "run.terminate_after_hub_push requires output.push_to_hub = true."
             )
+        if self.run.method != "script" and (self.model is None or self.dataset is None):
+            raise ValueError("[model] and [dataset] are required for training methods.")
         if self.run.method == "grpo" and not self.training.grpo_profile:
             raise ValueError("training.grpo_profile is required when run.method = 'grpo'.")
+        if self.run.method == "script" and not self.script.entrypoint and not self.script.command:
+            raise ValueError(
+                "script.entrypoint or script.command is required when run.method = 'script'."
+            )
         return self

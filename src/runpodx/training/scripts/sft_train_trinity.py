@@ -17,16 +17,17 @@ from functools import partial
 from pathlib import Path
 
 import torch
+from datasets import Dataset, load_dataset
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from trl import SFTTrainer
+
 if torch.cuda.is_available():
     torch.cuda.init()
     print(f"[runpodx] CUDA initialized: {torch.cuda.get_device_name(0)}")
 else:
     print("[runpodx] WARNING: CUDA not available, forcing bf16 skip")
     os.environ.setdefault("ACCELERATE_MIXED_PRECISION", "no")
-from datasets import Dataset, load_dataset
-from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
 
 try:
     from sft_shared import (
@@ -130,11 +131,18 @@ def build_training_args(config_cls, common_args: dict, eval_enabled: bool):
 
 
 def build_formatting_func(dataset_format: str, tokenizer, config: dict):
+    profile_config = config.get("profile_config") or {}
     formatter_kwargs = {
         "eos_token": tokenizer.eos_token or "",
         "append_eos": config.get("append_eos_token", True),
-        "sanitize_ascii": config.get("sanitize_ascii_outputs", False),
-        "max_tail_line_repeats": config.get("ascii_max_tail_line_repeats"),
+        "sanitize_ascii": profile_config.get(
+            "sanitize_outputs",
+            config.get("sanitize_ascii_outputs", False),
+        ),
+        "max_tail_line_repeats": profile_config.get(
+            "max_tail_line_repeats",
+            config.get("ascii_max_tail_line_repeats"),
+        ),
     }
     formatters = {
         "alpaca": partial(format_alpaca_example, **formatter_kwargs),
@@ -153,12 +161,19 @@ def maybe_convert_datasets_to_prompt_completion(
     if not config.get("convert_to_prompt_completion"):
         return train_dataset, eval_dataset, dataset_format
 
+    profile_config = config.get("profile_config") or {}
     converter_kwargs = {
         "source_format": dataset_format,
         "eos_token": tokenizer.eos_token or "",
         "append_eos": config.get("append_eos_token", True),
-        "sanitize_ascii": config.get("sanitize_ascii_outputs", False),
-        "max_tail_line_repeats": config.get("ascii_max_tail_line_repeats"),
+        "sanitize_ascii": profile_config.get(
+            "sanitize_outputs",
+            config.get("sanitize_ascii_outputs", False),
+        ),
+        "max_tail_line_repeats": profile_config.get(
+            "max_tail_line_repeats",
+            config.get("ascii_max_tail_line_repeats"),
+        ),
     }
     original_train_size = len(train_dataset)
     train_dataset = convert_dataset_to_prompt_completion(train_dataset, **converter_kwargs)
@@ -251,7 +266,12 @@ def run_generation_benchmark(model, tokenizer, dataset_format: str, config: dict
         except Exception as exc:
             print(f"[runpodx] W&B benchmark logging skipped: {exc}")
 
-    return {"aggregate": aggregate, "rows": benchmark_rows, "json_report_path": json_report_path, "md_report_path": md_report_path}
+    return {
+        "aggregate": aggregate,
+        "rows": benchmark_rows,
+        "json_report_path": json_report_path,
+        "md_report_path": md_report_path,
+    }
 
 
 def patch_rope_compat() -> None:
@@ -439,12 +459,14 @@ def main():
     if eval_dataset is not None:
         print(f"[runpodx] Validation dataset size: {len(eval_dataset)}")
     dataset_format = config.get("dataset_format", "alpaca")
-    train_dataset, eval_dataset, training_dataset_format = maybe_convert_datasets_to_prompt_completion(
-        train_dataset,
-        eval_dataset,
-        dataset_format,
-        tokenizer,
-        config,
+    train_dataset, eval_dataset, training_dataset_format = (
+        maybe_convert_datasets_to_prompt_completion(
+            train_dataset,
+            eval_dataset,
+            dataset_format,
+            tokenizer,
+            config,
+        )
     )
 
     # --- Training args ---

@@ -1,4 +1,4 @@
-# Full SFT of Qwen3.5-4B-Base on ASCII art (human-crafted, 5.3k samples)
+﻿# Full SFT of Qwen3.5-4B-Base on ASCII art (human-crafted, 5.3k samples)
 # Usage: runpodx run configs/ascii_art/qwen3_5-4b/ascii_art_sft_full_lr-3e-5-ga16_ctx4096_val.toml
 #        runpodx run configs/ascii_art/qwen3_5-4b/ascii_art_sft_full_lr-3e-5-ga16_ctx4096_val.toml --dry-run
 
@@ -43,11 +43,13 @@ logging_steps = 5
 save_steps = 100
 save_total_limit = 3
 append_eos_token = true
-sanitize_ascii_outputs = true
-ascii_max_tail_line_repeats = 8
 generation_eval_enabled = true
 generation_eval_max_new_tokens = 384
 convert_to_prompt_completion = true
+
+[training.profile_config]
+sanitize_outputs = true
+max_tail_line_repeats = 8
 
 [output]
 save_path = "/workspace/output"

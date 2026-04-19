@@ -106,15 +106,16 @@ class TrainingOrchestrator:
 
             # Install deps
             self._console.print("  Installing pip dependencies...")
-            self._install_dependencies()
+            self._install_dependencies(method, config)
 
             # Upload remote config
-            remote_config = method.generate_remote_config(config)
-            self._upload_json_config(remote_config)
+            if method.should_upload_config(config):
+                remote_config = method.generate_remote_config(config)
+                self._upload_json_config(remote_config)
 
-            # Step 6: Train
-            self._console.print("[bold blue]Step 6/6:[/] Starting training...")
-            self._run_training(config)
+            # Step 6: Run
+            self._console.print("[bold blue]Step 6/6:[/] Starting remote job...")
+            self._run_remote_job(config, method)
 
             self._console.print("[bold green]Training complete![/]")
 
@@ -231,19 +232,23 @@ class TrainingOrchestrator:
 
     def _upload_scripts(self, method, config: RunConfig) -> None:
         script_path = method.script_path(config)
-        result = self._executor.upload(script_path, f"{REMOTE_WORK_DIR}/train.py")
-        if result.returncode != 0:
-            raise RuntimeError(f"Script upload failed: {result.stderr}")
+        if script_path is not None:
+            result = self._executor.upload(
+                script_path,
+                f"{REMOTE_WORK_DIR}/{method.remote_script_name(config)}",
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Script upload failed: {result.stderr}")
 
-        result = self._executor.upload(
-            method.requirements_path(config), f"{REMOTE_WORK_DIR}/requirements.txt"
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Requirements upload failed: {result.stderr}")
+        requirements_path = method.requirements_path(config)
+        if requirements_path is not None:
+            result = self._executor.upload(
+                requirements_path, f"{REMOTE_WORK_DIR}/requirements.txt"
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Requirements upload failed: {result.stderr}")
 
-        for support_file in script_path.parent.glob("*.py"):
-            if support_file == script_path:
-                continue
+        for support_file in method.support_paths(config):
             result = self._executor.upload(
                 support_file, f"{REMOTE_WORK_DIR}/{support_file.name}"
             )
@@ -254,6 +259,9 @@ class TrainingOrchestrator:
 
     def _prepare_and_upload_dataset(self, config: RunConfig, method) -> None:
         dataset_config = config.dataset
+        if dataset_config is None:
+            self._console.print("  No dataset configured for this run.")
+            return
 
         if dataset_config.source == "huggingface":
             self._console.print("  Dataset will be loaded from HuggingFace on the pod.")
@@ -314,17 +322,22 @@ class TrainingOrchestrator:
         if result.returncode != 0:
             raise RuntimeError(f"Config upload failed: {result.stderr}")
 
-    def _install_dependencies(self) -> None:
-        # Upgrade torch first — the pod image ships torch 2.1 which is too old
-        # for TRL 0.29+ (needs FSDPModule from torch 2.6+). Installing torch
-        # separately ensures it's upgraded before TRL tries to import it.
-        torch_proc = self._executor.run(
-            "pip install 'torch>=2.6.0,<2.11'",
-            stream=True,
-            on_stdout=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
-            on_stderr=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
-        )
-        torch_proc.wait()
+    def _install_dependencies(self, method, config: RunConfig) -> None:
+        for command in method.preinstall_commands(config):
+            proc = self._executor.run(
+                command,
+                stream=True,
+                on_stdout=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
+                on_stderr=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
+            )
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"Dependency preinstall command failed: {command}")
+
+        if method.requirements_path(config) is None:
+            self._console.print("  No requirements file configured.")
+            return
+
         proc = self._executor.run(
             f"pip install -r {REMOTE_WORK_DIR}/requirements.txt",
             stream=True,
@@ -351,7 +364,7 @@ class TrainingOrchestrator:
             self._executor.run(cmd, stream=False)
             self._console.print("  [green]API keys forwarded to pod.[/]")
 
-    def _run_training(self, config: RunConfig) -> None:
+    def _run_remote_job(self, config: RunConfig, method) -> None:
         env_prefix = ""
         wandb_key = os.environ.get("WANDB_API_KEY")
         hf_token = config.output.hub_token or os.environ.get("HF_TOKEN")
@@ -363,10 +376,8 @@ class TrainingOrchestrator:
         if env_parts:
             env_prefix = " ".join(env_parts) + " "
 
-        cmd = (
-            f"cd {REMOTE_WORK_DIR} && "
-            f"{env_prefix}python train.py --config {REMOTE_WORK_DIR}/config.json"
-        )
+        remote_command = method.remote_command(REMOTE_WORK_DIR, config)
+        cmd = f"cd {REMOTE_WORK_DIR} && {env_prefix}{remote_command}"
         proc = self._executor.run(
             cmd,
             stream=True,
@@ -415,14 +426,18 @@ class TrainingOrchestrator:
     def _print_dry_run(self, config: RunConfig, method) -> None:
         self._console.print(Panel("[bold]Dry Run[/bold]", style="yellow"))
         self._console.print(f"  Method:    {config.run.method}")
-        self._console.print(f"  Model:     {config.model.name}")
-        self._console.print(f"  Adapter:   {config.model.adapter}")
-        self._console.print(f"  Dataset:   {config.dataset.source}:{config.dataset.path}")
-        self._console.print(f"  Format:    {config.dataset.format}")
-        self._console.print(f"  Epochs:    {config.training.epochs}")
-        self._console.print(f"  Batch:     {config.training.batch_size}")
-        self._console.print(f"  LR:        {config.training.lr}")
+        if config.model is not None:
+            self._console.print(f"  Model:     {config.model.name}")
+            self._console.print(f"  Adapter:   {config.model.adapter}")
+        if config.dataset is not None:
+            self._console.print(f"  Dataset:   {config.dataset.source}:{config.dataset.path}")
+            self._console.print(f"  Format:    {config.dataset.format}")
+        if config.run.method != "script":
+            self._console.print(f"  Epochs:    {config.training.epochs}")
+            self._console.print(f"  Batch:     {config.training.batch_size}")
+            self._console.print(f"  LR:        {config.training.lr}")
         self._console.print(f"  Script:    {method.script_path(config)}")
+        self._console.print(f"  Command:   {method.remote_command(REMOTE_WORK_DIR, config)}")
         if config.run.pod_id:
             self._console.print(f"  Pod:       {config.run.pod_id} (existing)")
         else:

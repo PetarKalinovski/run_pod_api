@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections import Counter
 import difflib
 import json
+from collections import Counter
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -43,6 +43,43 @@ except ImportError:
 PROSE_MARKERS = ("###", "```", "here is", "response:", "assistant:", "user:", "ascii art")
 PROFILE_VECTOR_BINS = 16
 OCCUPANCY_GRID_SIZE = 24
+DEFAULT_REWARD_NAMES = (
+    "ascii_style",
+    "anti_loop",
+    "target_similarity",
+    "target_length",
+)
+REWARD_ALIASES = {
+    "style": "ascii_style",
+    "ascii": "ascii_style",
+    "ascii_style_reward": "ascii_style",
+    "loop": "anti_loop",
+    "anti_loop_reward": "anti_loop",
+    "scaffold": "scaffold_penalty",
+    "scaffold_penalty_reward": "scaffold_penalty",
+    "similarity": "target_similarity",
+    "target_similarity_reward": "target_similarity",
+    "length": "target_length",
+    "target_length_reward": "target_length",
+    "eos_reward": "eos",
+    "clip": "clip_visual",
+    "clip_reward": "clip_visual",
+    "clip_visual_reward": "clip_visual",
+}
+
+
+def get_profile_config(config: dict) -> dict:
+    profile_config = config.get("profile_config") or {}
+    if not isinstance(profile_config, dict):
+        raise TypeError("profile_config must be a JSON object.")
+    return profile_config
+
+
+def profile_option(config: dict, profile_key: str, legacy_key: str, default=None):
+    profile_config = get_profile_config(config)
+    if profile_key in profile_config:
+        return profile_config[profile_key]
+    return config.get(legacy_key, default)
 
 
 def prepare_datasets(
@@ -57,8 +94,17 @@ def prepare_datasets(
         "source_format": dataset_format,
         "eos_token": tokenizer.eos_token or "",
         "append_eos": False,
-        "sanitize_ascii": config.get("sanitize_ascii_outputs", False),
-        "max_tail_line_repeats": config.get("ascii_max_tail_line_repeats"),
+        "sanitize_ascii": profile_option(
+            config,
+            "sanitize_outputs",
+            "sanitize_ascii_outputs",
+            False,
+        ),
+        "max_tail_line_repeats": profile_option(
+            config,
+            "max_tail_line_repeats",
+            "ascii_max_tail_line_repeats",
+        ),
     }
 
     original_train_size = len(train_dataset)
@@ -402,7 +448,13 @@ def target_length_reward(
     return rewards
 
 
-def eos_reward(completions, *, completion_ids=None, max_completion_length: int = 512, **kwargs) -> list[float]:
+def eos_reward(
+    completions,
+    *,
+    completion_ids=None,
+    max_completion_length: int = 512,
+    **kwargs,
+) -> list[float]:
     """Reward proper EOS termination; penalize hitting max length (looping)."""
     rewards: list[float] = []
     completion_id_rows = completion_ids or [None] * len(completions)
@@ -426,33 +478,69 @@ def eos_reward(completions, *, completion_ids=None, max_completion_length: int =
     return rewards
 
 
-def build_reward_functions(config: dict):
+def normalize_reward_names(config: dict) -> list[str]:
+    profile_config = get_profile_config(config)
+    raw_names = profile_config.get("rewards", config.get("grpo_rewards"))
+    if raw_names is None:
+        names = list(DEFAULT_REWARD_NAMES)
+        if profile_config.get("clip_reward", config.get("grpo_clip_reward", False)):
+            names.append("clip_visual")
+    elif isinstance(raw_names, str):
+        names = [item.strip() for item in raw_names.split(",") if item.strip()]
+    else:
+        names = [str(item).strip() for item in raw_names if str(item).strip()]
+
+    normalized = []
+    for name in names:
+        key = name.strip().lower().replace("-", "_")
+        normalized.append(REWARD_ALIASES.get(key, key))
+    return normalized
+
+
+def build_reward_function(name: str, config: dict):
     max_comp_len = int(config.get("grpo_max_completion_length", 512))
+    soft_overlong_cache = int(config.get("grpo_soft_overlong_cache", 32))
 
-    eos = partial(eos_reward, max_completion_length=max_comp_len)
-    eos.__name__ = "eos_reward"
-
-    # Core 4 rewards: anti_loop, clip, scaffold, eos
-    funcs = [
-        anti_loop_reward,
-        scaffold_penalty_reward,
-        eos,
-    ]
-
-    # CLIP visual reward — semantic signal
-    if config.get("grpo_clip_reward", False):
+    if name == "ascii_style":
+        return ascii_style_reward
+    if name == "anti_loop":
+        return anti_loop_reward
+    if name == "scaffold_penalty":
+        return scaffold_penalty_reward
+    if name == "target_similarity":
+        return target_similarity_reward
+    if name == "target_length":
+        target_length = partial(
+            target_length_reward,
+            max_completion_length=max_comp_len,
+            soft_overlong_cache=soft_overlong_cache,
+        )
+        target_length.__name__ = "target_length_reward"
+        return target_length
+    if name == "eos":
+        eos = partial(eos_reward, max_completion_length=max_comp_len)
+        eos.__name__ = "eos_reward"
+        return eos
+    if name == "clip_visual":
         if clip_visual_reward is not None:
             if init_clip is not None:
                 import torch
+
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 init_clip(device)
-            funcs.insert(1, clip_visual_reward)  # order: anti_loop, clip, scaffold, eos
-            print("[runpodx] CLIP visual reward enabled")
-        else:
-            print("[runpodx] WARNING: grpo_clip_reward=true but clip_ascii_reward module not found")
-            print("[runpodx] Falling back to 3 rewards (no CLIP)")
+            return clip_visual_reward
+        raise RuntimeError(
+            "ASCII GRPO reward 'clip_visual' requires clip_ascii_reward and its "
+            "dependencies to import successfully."
+        )
+    raise ValueError(f"Unknown ASCII GRPO reward: {name!r}")
 
-    return funcs
+
+def build_reward_functions(config: dict):
+    reward_names = normalize_reward_names(config)
+    if not reward_names:
+        raise ValueError("ASCII GRPO profile must enable at least one reward.")
+    return [build_reward_function(name, config) for name in reward_names]
 
 
 def run_generation_benchmark(model, tokenizer, config: dict, report_to: str):

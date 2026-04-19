@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 from datasets import Dataset, load_dataset
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 try:
     from trl import GRPOConfig, GRPOTrainer
@@ -148,6 +148,14 @@ def load_grpo_profile(profile_name: str):
     return module
 
 
+def reward_function_name(reward_func) -> str:
+    name = getattr(reward_func, "__name__", None)
+    if name:
+        return name
+    wrapped = getattr(reward_func, "func", None)
+    return getattr(wrapped, "__name__", reward_func.__class__.__name__)
+
+
 def main():
     if GRPOTrainer is None or GRPOConfig is None:
         print("[runpodx] ERROR: TRL with GRPO support is required.", file=sys.stderr)
@@ -249,11 +257,15 @@ def main():
     print("[runpodx] Dataset preparation complete for GRPO profile")
 
     reward_funcs = profile.build_reward_functions(config)
+    reward_names = [reward_function_name(func) for func in reward_funcs]
+    if not reward_funcs:
+        raise ValueError(f"GRPO profile {profile_name!r} did not enable any reward functions.")
+    print(f"[runpodx] Enabled GRPO rewards: {', '.join(reward_names)}")
     reward_weights = config.get("grpo_reward_weights")
     if reward_weights is not None and len(reward_weights) != len(reward_funcs):
         raise ValueError(
             "grpo_reward_weights length must match reward function count "
-            f"({len(reward_funcs)})."
+            f"({len(reward_funcs)}: {', '.join(reward_names)})."
         )
     common_args = dict(
         output_dir=config.get("output_dir", "/workspace/output"),

@@ -31,14 +31,43 @@ class BaseMethod(ABC):
     """Base class for training methods (SFT, GRPO, etc.)."""
 
     @abstractmethod
-    def script_path(self, run_config: RunConfig | None = None) -> Path:
-        """Path to the training script to upload."""
+    def script_path(self, run_config: RunConfig | None = None) -> Path | None:
+        """Path to the main script to upload, if this method has one."""
         ...
 
-    @abstractmethod
-    def requirements_path(self, run_config: RunConfig | None = None) -> Path:
-        """Path to the requirements.txt for this method."""
-        ...
+    def remote_script_name(self, run_config: RunConfig | None = None) -> str:
+        """Filename used for the main script on the pod."""
+        return "train.py"
+
+    def requirements_path(self, run_config: RunConfig | None = None) -> Path | None:
+        """Path to an optional requirements.txt for this method."""
+        return None
+
+    def support_paths(self, run_config: RunConfig | None = None) -> list[Path]:
+        """Additional local files to upload next to the main script."""
+        script_path = self.script_path(run_config)
+        if script_path is None:
+            return []
+        return [
+            support_file
+            for support_file in script_path.parent.glob("*.py")
+            if support_file != script_path
+        ]
+
+    def preinstall_commands(self, run_config: RunConfig | None = None) -> list[str]:
+        """Commands to run before requirements installation."""
+        return []
+
+    def should_upload_config(self, run_config: RunConfig | None = None) -> bool:
+        """Whether config.json should be uploaded for this method."""
+        return True
+
+    def remote_command(self, remote_work_dir: str, run_config: RunConfig) -> str:
+        """Command to execute on the pod."""
+        return (
+            f"python {self.remote_script_name(run_config)} "
+            f"--config {remote_work_dir}/config.json"
+        )
 
     @abstractmethod
     def generate_remote_config(self, run_config: RunConfig) -> dict:
@@ -53,4 +82,5 @@ class BaseMethod(ABC):
 
 # Import concrete methods so decorators fire
 from runpodx.training.methods import grpo as _grpo  # noqa: E402, F401
+from runpodx.training.methods import script as _script  # noqa: E402, F401
 from runpodx.training.methods import sft as _sft  # noqa: E402, F401

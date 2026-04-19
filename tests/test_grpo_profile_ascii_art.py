@@ -14,6 +14,16 @@ def test_build_reward_functions_count():
     assert len(reward_funcs) == 4
 
 
+def test_build_reward_functions_can_select_profile_rewards():
+    reward_funcs = build_reward_functions({"grpo_rewards": ["anti_loop", "eos"]})
+    assert [func.__name__ for func in reward_funcs] == ["anti_loop_reward", "eos_reward"]
+
+
+def test_build_reward_functions_reads_profile_config():
+    reward_funcs = build_reward_functions({"profile_config": {"rewards": ["scaffold", "eos"]}})
+    assert [func.__name__ for func in reward_funcs] == ["scaffold_penalty_reward", "eos_reward"]
+
+
 def test_target_similarity_prefers_matching_shape():
     target = ["/\\\n||\n\\/"]
     matching = ["/\\\n||\n\\/"]

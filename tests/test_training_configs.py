@@ -9,11 +9,11 @@ from runpodx.configs.loader import resolve_config
 from runpodx.training.configs import (
     DatasetConfig,
     ModelConfig,
-    MonitoringConfig,
     OutputConfig,
     PodSpecConfig,
     RunConfig,
     RunMetaConfig,
+    ScriptConfig,
     TrainingConfig,
 )
 
@@ -100,6 +100,8 @@ class TestTrainingConfig:
         assert config.grpo_soft_overlong_cache == 32
         assert config.grpo_beta == 0.0
         assert config.grpo_profile is None
+        assert config.grpo_rewards is None
+        assert config.profile_config == {}
 
 
 class TestRunConfig:
@@ -164,6 +166,21 @@ class TestRunConfig:
             training=TrainingConfig(grpo_profile="ascii_art"),
         )
         assert config.training.grpo_profile == "ascii_art"
+
+    def test_script_method_does_not_require_model_or_dataset(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="script", pod_id="pod_123"),
+            script=ScriptConfig(entrypoint="jobs/run.py"),
+        )
+        assert config.model is None
+        assert config.dataset is None
+        assert config.script.entrypoint == "jobs/run.py"
+
+    def test_script_method_requires_entrypoint_or_command(self):
+        with pytest.raises(Exception, match="script.entrypoint"):
+            RunConfig(
+                run=RunMetaConfig(method="script", pod_id="pod_123"),
+            )
 
     def test_load_from_toml(self):
         toml_content = b"""

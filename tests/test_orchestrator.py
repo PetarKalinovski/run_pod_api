@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +14,7 @@ from runpodx.training.configs import (
     PodSpecConfig,
     RunConfig,
     RunMetaConfig,
+    ScriptConfig,
     TrainingConfig,
 )
 from runpodx.training.methods import get_method
@@ -134,7 +134,25 @@ class TestGRPOMethod:
         assert remote_config["grpo_num_generations"] == 4
         assert remote_config["grpo_max_completion_length"] == 192
         assert remote_config["grpo_soft_overlong_cache"] == 32
+        assert remote_config["grpo_rewards"] is None
         assert remote_config["validation_ratio"] == 0.1
+
+    def test_generate_remote_config_with_selected_grpo_rewards(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="grpo", pod_id="pod_abc123"),
+            model=ModelConfig(name="Qwen/Qwen3-0.6B"),
+            dataset=DatasetConfig(source="huggingface", path="tatsu-lab/alpaca"),
+            training=TrainingConfig(
+                grpo_profile="ascii_art",
+                grpo_rewards=["anti_loop", "eos"],
+                grpo_reward_weights=[1.0, 0.25],
+            ),
+        )
+        method = get_method("grpo")
+        remote_config = method.generate_remote_config(config)
+
+        assert remote_config["grpo_rewards"] == ["anti_loop", "eos"]
+        assert remote_config["grpo_reward_weights"] == [1.0, 0.25]
 
     def test_script_path_exists(self):
         method = get_method("grpo")
@@ -144,6 +162,45 @@ class TestGRPOMethod:
     def test_canonical_format(self):
         method = get_method("grpo")
         assert method.canonical_format() == "sft"
+
+
+class TestScriptMethod:
+    def test_generate_remote_config(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="script", pod_id="pod_abc123"),
+            script=ScriptConfig(
+                entrypoint="jobs/run_eval.py",
+                requirements="jobs/requirements.txt",
+                uploads=["jobs/helper.py"],
+                config={"task": "eval"},
+            ),
+        )
+        method = get_method("script")
+
+        assert method.script_path(config).as_posix() == "jobs/run_eval.py"
+        assert method.remote_script_name(config) == "run_eval.py"
+        assert method.requirements_path(config).as_posix() == "jobs/requirements.txt"
+        assert [path.as_posix() for path in method.support_paths(config)] == ["jobs/helper.py"]
+        assert method.generate_remote_config(config) == {"task": "eval"}
+        assert method.remote_command("/workspace/runpodx_run", config) == (
+            "python /workspace/runpodx_run/run_eval.py "
+            "--config /workspace/runpodx_run/config.json"
+        )
+
+    def test_custom_remote_command(self):
+        config = RunConfig(
+            run=RunMetaConfig(method="script", pod_id="pod_abc123"),
+            script=ScriptConfig(
+                entrypoint="jobs/run_eval.py",
+                command="bash {script_path} --cfg {config_path}",
+            ),
+        )
+        method = get_method("script")
+
+        assert method.remote_command("/workspace/runpodx_run", config) == (
+            "bash /workspace/runpodx_run/run_eval.py "
+            "--cfg /workspace/runpodx_run/config.json"
+        )
 
 
 class TestTrainingOrchestrator:
@@ -186,6 +243,7 @@ class TestTrainingOrchestrator:
         # The last call with stream=True returns the mock_proc
         mock_executor.run.side_effect = [
             MagicMock(returncode=0),  # mkdir
+            MagicMock(returncode=0),  # torch install
             MagicMock(returncode=0),  # pip install
             mock_proc,                # training
         ]
@@ -220,6 +278,7 @@ class TestTrainingOrchestrator:
         mock_proc.returncode = 0
         mock_executor.run.side_effect = [
             MagicMock(returncode=0),  # mkdir
+            MagicMock(returncode=0),  # torch install
             MagicMock(returncode=0),  # pip install
             mock_proc,                # training
         ]

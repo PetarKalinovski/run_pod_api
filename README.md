@@ -6,7 +6,7 @@ Config-driven Python client and CLI for [RunPod's](https://runpod.io) REST API. 
 
 - **Pod Management** — create, start, stop, restart, delete GPU pods
 - **Template & Volume Management** — manage pod templates and network storage
-- **Training Orchestrator** — provision a pod, SSH in, upload scripts, install deps, train, stream logs
+- **Remote Job Orchestrator** - provision a pod, SSH in, upload scripts, install deps, run commands, stream logs
 - **Config-Driven** — everything controlled via TOML files
 - **Dataset Formats** — Alpaca, ShareGPT, completion, custom field mapping
 - **LoRA & Full Fine-Tuning** — with automatic PEFT setup
@@ -55,6 +55,9 @@ runpodx pods create pod.toml
 
 # Run a training job
 runpodx run training.toml
+
+# Run any script/command on a pod
+runpodx run script_job.toml
 
 # Dry run — preview what would happen
 runpodx run training.toml --dry-run
@@ -199,9 +202,13 @@ grpo_num_generations = 4                 # Completions sampled per prompt
 grpo_max_completion_length = 192         # Max tokens per completion
 grpo_beta = 0.05                         # KL regularization
 grpo_temperature = 0.9                   # Sampling temperature
-grpo_reward_weights = [0.45, 0.75, 1.25, 0.9]  # Per-reward-function weights
-sanitize_ascii_outputs = true
+grpo_rewards = ["ascii_style", "anti_loop", "target_similarity", "target_length"]
+grpo_reward_weights = [0.45, 0.75, 1.25, 0.9]  # Must match grpo_rewards
 generation_eval_enabled = true           # Run generation benchmark after training
+
+[training.profile_config]
+sanitize_outputs = true                  # ASCII profile option
+max_tail_line_repeats = 8                # ASCII profile option
 
 [output]
 push_to_hub = true
@@ -212,17 +219,54 @@ hub_model_id = "your-username/Qwen3-4B-ascii-art-grpo"
 runpodx run ascii_art_grpo.toml
 ```
 
+### Generic Script Example
+
+Use `run.method = "script"` when you want runpodx to manage the pod lifecycle,
+SSH, uploads, dependency install, logging, and cleanup, but you want to run your
+own script instead of the built-in SFT/GRPO trainers.
+
+```toml
+# script_job.toml
+
+[run]
+method = "script"
+pod_id = "pod_abc123"  # Or omit and provide [pod] to create a new pod
+
+[script]
+entrypoint = "jobs/run_eval.py"
+requirements = "jobs/requirements.txt"
+uploads = ["jobs/helper.py"]
+command = "python {script_path} --config {config_path}"
+
+[script.config]
+task = "eval"
+samples = 100
+
+[output]
+save_path = "/workspace/output"
+```
+
+Supported command placeholders:
+
+| Placeholder | Meaning |
+|-------------|---------|
+| `{remote_work_dir}` | Remote work directory, currently `/workspace/runpodx_run` |
+| `{script_path}` | Uploaded entrypoint path on the pod |
+| `{config_path}` | Uploaded JSON config path on the pod |
+
 ---
 
-## Training Configuration Reference
+## Run Configuration Reference
 
-A training config is a single TOML file with these sections:
+A run config is a single TOML file with these sections. Training methods use
+`[model]`, `[dataset]`, and `[training]`; generic script jobs can omit model and
+dataset and use `[script]` instead.
 
 ### `[run]` — Run Metadata
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `method` | string | **required** | Training method. One of: `"sft"`, `"grpo"`, `"unsloth_grpo"` |
+| `method` | string | **required** | Remote job method. One of: `"sft"`, `"grpo"`, `"unsloth_grpo"`, `"script"` |
 | `pod_id` | string | `null` | ID of an existing pod to use. Omit to create a new pod from the `[pod]` section |
 | `terminate_on_complete` | bool | `false` | Delete the pod after training completes successfully. Saves money by auto-cleaning up |
 | `terminate_after_hub_push` | bool | `false` | Delete the pod after a successful training run that pushes the model to HuggingFace Hub. Requires `output.push_to_hub = true` |
@@ -298,8 +342,9 @@ Only used when `run.pod_id` is not set. Defines the GPU pod to create.
 | `save_total_limit` | int | `3` | Maximum number of checkpoints to keep. Oldest are deleted first |
 | `append_eos_token` | bool | `true` | Append EOS token to each assistant/response target during SFT |
 | `convert_to_prompt_completion` | bool | `false` | Convert dataset into prompt/completion pairs and train only on completion tokens (when supported by TRL) |
-| `sanitize_ascii_outputs` | bool | `false` | Trim pathological repeated tail lines in ASCII-art targets |
-| `ascii_max_tail_line_repeats` | int | `null` | Max repeated copies allowed for the final output line. `null` = no limit |
+| `profile_config` | table | `{}` | Method/profile-specific options passed through to the remote runner. Use this for domain-specific knobs such as ASCII cleanup |
+| `sanitize_ascii_outputs` | bool | `false` | Deprecated. Use `[training.profile_config] sanitize_outputs = true` for ASCII cleanup |
+| `ascii_max_tail_line_repeats` | int | `null` | Deprecated. Use `[training.profile_config] max_tail_line_repeats = 8` for ASCII cleanup |
 | `generation_eval_enabled` | bool | `false` | Run a prompt-based generation benchmark after training |
 | `generation_eval_max_new_tokens` | int | `384` | Max new tokens to generate for benchmark prompts |
 | `generation_eval_prompts` | list[string] | `null` | Custom prompt list for the post-training generation benchmark. `null` = use defaults |
@@ -317,7 +362,46 @@ These options only apply when `run.method = "grpo"` or `"unsloth_grpo"`.
 | `grpo_beta` | float | `0.0` | KL regularization coefficient for GRPO. `0.0` = no KL penalty |
 | `grpo_temperature` | float | `1.0` | Sampling temperature for GRPO rollouts |
 | `grpo_top_p` | float | `1.0` | Top-p (nucleus) sampling value for GRPO rollouts |
+| `grpo_rewards` | list[string] | `null` | Optional profile-specific reward names to enable. `null` lets the profile choose defaults |
 | `grpo_reward_weights` | list[float] | `null` | Optional reward weights for the GRPO reward functions. Length must match the number of reward functions in the profile |
+
+#### Profile-Specific Options
+
+Use `[training.profile_config]` for options that belong to one profile or
+workload rather than to runpodx's core orchestration layer. Existing flat ASCII
+keys are still supported for backwards compatibility, but new configs should use
+the nested form.
+
+```toml
+[training]
+grpo_profile = "ascii_art"
+grpo_rewards = ["anti_loop", "eos"]
+
+[training.profile_config]
+sanitize_outputs = true
+max_tail_line_repeats = 8
+rewards = ["anti_loop", "eos"]  # Optional profile-owned alternative to grpo_rewards
+clip_reward = false
+```
+
+For the built-in `ascii_art` GRPO profile, available reward names include:
+`ascii_style`, `anti_loop`, `target_similarity`, `target_length`,
+`scaffold_penalty`, `eos`, and `clip_visual`.
+
+### `[script]` - Generic Script Execution
+
+These options apply when `run.method = "script"`. In this mode `[model]` and
+`[dataset]` are optional; runpodx focuses on pod setup, uploads, dependency
+installation, command execution, log streaming, downloads, and cleanup.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `entrypoint` | string | `null` | Local script file to upload and execute |
+| `command` | string | `null` | Remote command to run. Supports `{remote_work_dir}`, `{script_path}`, and `{config_path}` placeholders |
+| `requirements` | string | `null` | Optional local requirements file to upload and install |
+| `uploads` | list[string] | `[]` | Extra local files to upload next to the script |
+| `preinstall_commands` | list[string] | `[]` | Commands to run before installing requirements |
+| `config` | table | `{}` | JSON payload written to `config.json` for the script |
 
 ### `[output]` — Model Output
 
@@ -483,7 +567,7 @@ runpodx volumes delete <id> --force  # Delete without confirmation
 ### Training
 
 ```bash
-runpodx run config.toml              # Run training pipeline
+runpodx run config.toml              # Run training or script pipeline
 runpodx run config.toml --dry-run    # Preview without executing
 runpodx run config.toml --pod ID     # Use existing pod
 ```

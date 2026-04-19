@@ -18,7 +18,12 @@ class GRPOMethod(BaseMethod):
     def requirements_path(self, run_config: RunConfig | None = None) -> Path:
         return _SCRIPTS_DIR / "requirements.txt"
 
+    def preinstall_commands(self, run_config: RunConfig | None = None) -> list[str]:
+        return ["pip install 'torch>=2.6.0,<2.11'"]
+
     def generate_remote_config(self, run_config: RunConfig) -> dict:
+        if run_config.model is None or run_config.dataset is None:
+            raise ValueError("GRPO runs require model and dataset config.")
         m = run_config.model
         d = run_config.dataset
         t = run_config.training
@@ -55,6 +60,8 @@ class GRPOMethod(BaseMethod):
             "grpo_beta": t.grpo_beta,
             "grpo_temperature": t.grpo_temperature,
             "grpo_top_p": t.grpo_top_p,
+            "grpo_rewards": t.grpo_rewards,
+            "profile_config": t.profile_config,
             "grpo_reward_weights": t.grpo_reward_weights,
             "grpo_profile": t.grpo_profile,
             "grpo_clip_reward": t.grpo_clip_reward,
