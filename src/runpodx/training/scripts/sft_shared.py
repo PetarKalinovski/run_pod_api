@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -7,12 +8,41 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from datasets import Dataset
 
+DEFAULT_ASCII_BENCHMARK_PROMPT_GROUPS = {
+    "core_objects": [
+        "Draw an ASCII art sword.",
+        "Draw an ASCII art lantern.",
+        "Draw an ASCII art chair.",
+        "Draw an ASCII art key.",
+        "Draw an ASCII art skull.",
+    ],
+    "animals_creatures": [
+        "Draw an ASCII art cat.",
+        "Draw an ASCII art owl.",
+        "Draw an ASCII art fish.",
+        "Draw an ASCII art dragon.",
+        "Draw an ASCII art horse.",
+    ],
+    "scenes_structures": [
+        "Draw an ASCII art castle.",
+        "Draw an ASCII art pine tree.",
+        "Draw an ASCII art house.",
+        "Draw an ASCII art mountain.",
+        "Draw an ASCII art ship.",
+    ],
+    "compositions": [
+        "Draw an ASCII art knight holding a sword.",
+        "Draw an ASCII art robot.",
+        "Draw an ASCII art treasure chest.",
+        "Draw an ASCII art campfire.",
+        "Draw an ASCII art bird on a branch.",
+    ],
+}
+
 DEFAULT_ASCII_BENCHMARK_PROMPTS = [
-    "Draw an ASCII art sword.",
-    "Draw an ASCII art castle.",
-    "Draw an ASCII art cat.",
-    "Draw an ASCII art dragon.",
-    "Draw an ASCII art pine tree.",
+    prompt
+    for group_prompts in DEFAULT_ASCII_BENCHMARK_PROMPT_GROUPS.values()
+    for prompt in group_prompts
 ]
 
 WANDB_RUN_ID_FILENAME = ".wandb_run_id"
@@ -378,7 +408,14 @@ def build_generation_prompt(prompt: str, dataset_format: str) -> str:
     return f"### Instruction:\n{prompt}\n\n### Response:\n"
 
 
-def analyze_ascii_response(text: str) -> dict[str, float | int]:
+def _safe_std(values: list[float | int]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(float(v) for v in values) / len(values)
+    return (sum((float(v) - mean) ** 2 for v in values) / len(values)) ** 0.5
+
+
+def analyze_ascii_response(text: str) -> dict[str, float | int | str]:
     lines = _normalize_newlines(text).split("\n")
     if lines == [""]:
         lines = []
@@ -409,6 +446,36 @@ def analyze_ascii_response(text: str) -> dict[str, float | int]:
     if non_empty_lines:
         repeat_fraction = 1.0 - (unique_non_empty / len(non_empty_lines))
 
+    widths = [len(line.rstrip()) for line in non_empty_lines]
+    occupancies = [sum(1 for ch in line if not ch.isspace()) for line in non_empty_lines]
+    non_space_chars = [ch for ch in text if not ch.isspace()]
+    alnum_fraction = (
+        sum(ch.isalnum() for ch in non_space_chars) / len(non_space_chars) if non_space_chars else 0.0
+    )
+    ascii_art_line_count = count_ascii_art_lines(text)
+    contains_code_fence_or_preamble = int("```" in text or bool(_LEADING_PREAMBLE_RE.search(text.split("\n")[0].strip())))
+
+    is_too_short = int(len(non_empty_lines) < 4)
+    is_looping = int(max_consecutive_repeat >= 4 or repeat_fraction >= 0.5)
+    is_punctuation_blob = int(
+        ascii_art_line_count < 2
+        and len(non_space_chars) > 0
+        and (sum((not ch.isalnum()) for ch in non_space_chars) / len(non_space_chars)) >= 0.8
+    )
+    contains_non_art_text = int(any(sum(ch.isalpha() for ch in line) >= max(4, len(line.strip()) // 3) for line in non_empty_lines))
+
+    failure_tags = [
+        tag
+        for tag, active in (
+            ("too_short", is_too_short),
+            ("looping", is_looping),
+            ("punctuation_blob", is_punctuation_blob),
+            ("contains_non_art_text", contains_non_art_text),
+            ("has_preamble", contains_code_fence_or_preamble),
+        )
+        if active
+    ]
+
     return {
         "line_count": len(lines),
         "non_empty_line_count": len(non_empty_lines),
@@ -416,6 +483,17 @@ def analyze_ascii_response(text: str) -> dict[str, float | int]:
         "max_consecutive_repeat": max_consecutive_repeat,
         "tail_repeat_count": tail_repeat_count,
         "repeat_line_fraction": repeat_fraction,
+        "char_count": sum(len(line) for line in lines),
+        "width_std": _safe_std(widths),
+        "occupancy_std": _safe_std(occupancies),
+        "alnum_fraction": alnum_fraction,
+        "ascii_art_line_count": ascii_art_line_count,
+        "contains_code_fence_or_preamble": contains_code_fence_or_preamble,
+        "is_too_short": is_too_short,
+        "is_looping": is_looping,
+        "is_punctuation_blob": is_punctuation_blob,
+        "contains_non_art_text": contains_non_art_text,
+        "failure_tags": ",".join(failure_tags),
     }
 
 
@@ -423,19 +501,68 @@ def summarize_generation_benchmark(rows: list[dict[str, Any]]) -> dict[str, floa
     if not rows:
         return {
             "mean_line_count": 0.0,
+            "mean_non_empty_line_count": 0.0,
             "mean_repeat_line_fraction": 0.0,
             "mean_max_consecutive_repeat": 0.0,
+            "mean_char_count": 0.0,
+            "mean_width_std": 0.0,
+            "mean_occupancy_std": 0.0,
+            "mean_alnum_fraction": 0.0,
             "eos_termination_rate": 0.0,
             "loop_rate": 0.0,
+            "too_short_rate": 0.0,
+            "punctuation_blob_rate": 0.0,
+            "non_art_text_rate": 0.0,
         }
 
     count = len(rows)
     return {
         "mean_line_count": sum(float(row["line_count"]) for row in rows) / count,
-        "mean_repeat_line_fraction": sum(float(row["repeat_line_fraction"]) for row in rows)
-        / count,
-        "mean_max_consecutive_repeat": sum(float(row["max_consecutive_repeat"]) for row in rows)
-        / count,
+        "mean_non_empty_line_count": sum(float(row["non_empty_line_count"]) for row in rows) / count,
+        "mean_repeat_line_fraction": sum(float(row["repeat_line_fraction"]) for row in rows) / count,
+        "mean_max_consecutive_repeat": sum(float(row["max_consecutive_repeat"]) for row in rows) / count,
+        "mean_char_count": sum(float(row["char_count"]) for row in rows) / count,
+        "mean_width_std": sum(float(row["width_std"]) for row in rows) / count,
+        "mean_occupancy_std": sum(float(row["occupancy_std"]) for row in rows) / count,
+        "mean_alnum_fraction": sum(float(row["alnum_fraction"]) for row in rows) / count,
         "eos_termination_rate": sum(float(row["terminated_on_eos"]) for row in rows) / count,
-        "loop_rate": sum(1.0 for row in rows if int(row["max_consecutive_repeat"]) >= 4) / count,
+        "loop_rate": sum(float(row["is_looping"]) for row in rows) / count,
+        "too_short_rate": sum(float(row["is_too_short"]) for row in rows) / count,
+        "punctuation_blob_rate": sum(float(row["is_punctuation_blob"]) for row in rows) / count,
+        "non_art_text_rate": sum(float(row["contains_non_art_text"]) for row in rows) / count,
     }
+
+
+def write_generation_benchmark_report(output_dir: str, aggregate: dict[str, Any], rows: list[dict[str, Any]]) -> tuple[str, str]:
+    benchmark_dir = Path(output_dir) / "benchmark"
+    benchmark_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = benchmark_dir / "generation_benchmark.json"
+    md_path = benchmark_dir / "generation_benchmark.md"
+    json_payload = {"aggregate": aggregate, "rows": rows}
+    json_path.write_text(json.dumps(json_payload, indent=2, ensure_ascii=False))
+
+    lines = [
+        "# Generation Benchmark",
+        "",
+        "## Aggregate",
+    ]
+    for key, value in aggregate.items():
+        lines.append(f"- {key}: {value}")
+    lines.extend(["", "## Samples"])
+    for row in rows:
+        lines.append(f"### {row['prompt']}")
+        lines.append(f"- terminated_on_eos: {row['terminated_on_eos']}")
+        lines.append(f"- line_count: {row['line_count']}")
+        lines.append(f"- non_empty_line_count: {row['non_empty_line_count']}")
+        lines.append(f"- repeat_line_fraction: {row['repeat_line_fraction']}")
+        lines.append(f"- max_consecutive_repeat: {row['max_consecutive_repeat']}")
+        lines.append(f"- width_std: {row['width_std']}")
+        lines.append(f"- occupancy_std: {row['occupancy_std']}")
+        lines.append(f"- failure_tags: {row['failure_tags']}")
+        lines.append("```")
+        lines.append(str(row["response"]))
+        lines.append("```")
+        lines.append("")
+    md_path.write_text("\n".join(lines))
+    return str(json_path), str(md_path)

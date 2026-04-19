@@ -1,10 +1,14 @@
-torch>=2.1.0
-transformers>=4.46.0
-datasets>=2.18.0
-peft>=0.10.0
-trl>=0.15.0
-accelerate>=0.28.0
-bitsandbytes>=0.43.0
-wandb>=0.16.0
-huggingface_hub>=0.25.0
+# RunPod pods have CUDA 12.x drivers. torch 2.11+ pulls CUDA 13
+# toolkit which requires newer drivers. torch 2.6+ is needed for
+# TRL 0.29 GRPO (FSDPModule import).
+torch>=2.6.0,<2.11
+transformers>=4.46.0,<6
+datasets>=2.18.0,<5
+peft>=0.10.0,<1
+trl>=0.29.0,<1
+accelerate>=0.28.0,<2
+bitsandbytes>=0.43.0,<1
+wandb>=0.16.0,<1
+huggingface_hub>=0.25.0,<2
 filelock>=3.16.0
+Pillow>=10.0.0

@@ -110,12 +110,16 @@ class DatasetConfig(BaseConfig):
         Field(description="Input data format for normalization."),
     ] = "alpaca"
     max_samples: Annotated[int | None, Field(ge=1, description="Limit dataset size.")] = None
+    validation_split: Annotated[
+        str | None,
+        Field(description="HF split name for a pre-built validation set (e.g. 'validation'). Takes precedence over validation_ratio."),
+    ] = None
     validation_ratio: Annotated[
         float | None,
         Field(
             gt=0.0,
             lt=1.0,
-            description="Fraction of samples reserved for validation. None disables eval.",
+            description="Fraction of samples reserved for validation. None disables eval. Ignored if validation_split is set.",
         ),
     ] = None
     validation_seed: Annotated[
@@ -140,12 +144,17 @@ class TrainingConfig(BaseConfig):
     epochs: Annotated[int, Field(ge=1, description="Number of training epochs.")] = 3
     lr: Annotated[float, Field(gt=0, description="Learning rate.")] = 2e-5
     batch_size: Annotated[int, Field(ge=1, description="Per-device batch size.")] = 4
+    eval_batch_size: Annotated[int, Field(ge=1, description="Per-device eval batch size.")] = 1
     gradient_accumulation: Annotated[
         int, Field(ge=1, description="Gradient accumulation steps.")
     ] = 8
     max_seq_length: Annotated[int, Field(ge=1, description="Maximum sequence length.")] = 2048
     warmup_ratio: Annotated[float, Field(ge=0.0, le=1.0, description="Warmup ratio.")] = 0.03
     weight_decay: Annotated[float, Field(ge=0.0, description="Weight decay.")] = 0.01
+    max_grad_norm: Annotated[
+        float,
+        Field(gt=0.0, description="Gradient clipping norm."),
+    ] = 1.0
     bf16: Annotated[bool, Field(description="Use bfloat16.")] = True
     fp16: Annotated[bool, Field(description="Use float16.")] = False
     optimizer: Annotated[str, Field(description="Optimizer name.")] = "adamw_8bit"
@@ -153,6 +162,7 @@ class TrainingConfig(BaseConfig):
     logging_steps: Annotated[int, Field(ge=1, description="Log every N steps.")] = 10
     save_steps: Annotated[int, Field(ge=1, description="Save checkpoint every N steps.")] = 500
     save_total_limit: Annotated[int | None, Field(ge=1, description="Max checkpoints.")] = 3
+    eval_steps: Annotated[int | None, Field(ge=1, description="Eval every N steps. If set, overrides per-epoch eval.")] = None
     append_eos_token: Annotated[
         bool,
         Field(description="Append EOS to each assistant/response target during SFT."),
@@ -164,6 +174,10 @@ class TrainingConfig(BaseConfig):
     ascii_max_tail_line_repeats: Annotated[
         int | None,
         Field(ge=1, description="Max repeated copies allowed for the final output line."),
+    ] = None
+    neftune_noise_alpha: Annotated[
+        float | None,
+        Field(ge=0, description="NEFTune noise alpha for embedding regularization. Typical: 5-15."),
     ] = None
     generation_eval_enabled: Annotated[
         bool,
@@ -229,6 +243,10 @@ class TrainingConfig(BaseConfig):
             ),
         ),
     ] = None
+    grpo_clip_reward: Annotated[
+        bool,
+        Field(description="Enable CLIP visual reward for ASCII art GRPO. Adds a 6th reward function."),
+    ] = False
 
 
 class OutputConfig(BaseConfig):

@@ -45,9 +45,11 @@ class SFTMethod(BaseMethod):
             "num_train_epochs": t.epochs,
             "learning_rate": t.lr,
             "per_device_train_batch_size": t.batch_size,
+            "per_device_eval_batch_size": t.eval_batch_size,
             "gradient_accumulation_steps": t.gradient_accumulation,
             "warmup_ratio": t.warmup_ratio,
             "weight_decay": t.weight_decay,
+            "max_grad_norm": t.max_grad_norm,
             "bf16": t.bf16,
             "fp16": t.fp16,
             "optimizer": t.optimizer,
@@ -55,9 +57,11 @@ class SFTMethod(BaseMethod):
             "logging_steps": t.logging_steps,
             "save_steps": t.save_steps,
             "save_total_limit": t.save_total_limit,
+            "eval_steps": t.eval_steps,
             "append_eos_token": t.append_eos_token,
             "sanitize_ascii_outputs": t.sanitize_ascii_outputs,
             "ascii_max_tail_line_repeats": t.ascii_max_tail_line_repeats,
+            "neftune_noise_alpha": t.neftune_noise_alpha,
             "generation_eval_enabled": t.generation_eval_enabled,
             "generation_eval_max_new_tokens": t.generation_eval_max_new_tokens,
             "generation_eval_prompts": t.generation_eval_prompts,
@@ -94,7 +98,9 @@ class SFTMethod(BaseMethod):
         if d.max_samples is not None:
             config["max_samples"] = d.max_samples
 
-        if d.validation_ratio is not None:
+        if d.validation_split is not None:
+            config["hf_validation_split"] = d.validation_split
+        elif d.validation_ratio is not None:
             config["validation_ratio"] = d.validation_ratio
             config["validation_seed"] = d.validation_seed
 

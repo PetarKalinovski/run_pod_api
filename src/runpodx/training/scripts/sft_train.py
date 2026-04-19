@@ -15,7 +15,16 @@ import sys
 from functools import partial
 from pathlib import Path
 
+# Force CUDA init before transformers validates bf16 support.
+# On some RunPod images, torch.cuda.is_available() returns False until
+# the CUDA runtime is explicitly initialized.
 import torch
+if torch.cuda.is_available():
+    torch.cuda.init()
+    print(f"[runpodx] CUDA initialized: {torch.cuda.get_device_name(0)}")
+else:
+    print("[runpodx] WARNING: CUDA not available, forcing bf16 skip")
+    os.environ.setdefault("ACCELERATE_MIXED_PRECISION", "no")
 from datasets import Dataset, load_dataset
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
@@ -31,6 +40,7 @@ try:
         format_sharegpt_example,
         resolve_wandb_run_id,
         summarize_generation_benchmark,
+        write_generation_benchmark_report,
     )
 except ImportError:
     from runpodx.training.scripts.sft_shared import (
@@ -42,6 +52,7 @@ except ImportError:
         format_sharegpt_example,
         resolve_wandb_run_id,
         summarize_generation_benchmark,
+        write_generation_benchmark_report,
     )
 
 try:
@@ -73,6 +84,12 @@ def load_sft_dataset(config: dict) -> tuple[Dataset, Dataset | None]:
     if max_samples and len(ds) > max_samples:
         ds = ds.select(range(max_samples))
 
+    # If the HF dataset has a dedicated validation split, use it directly.
+    hf_validation_split = config.get("hf_validation_split")
+    if hf_validation_split and hf_dataset:
+        eval_ds = load_dataset(hf_dataset, split=hf_validation_split)
+        return ds, eval_ds
+
     validation_ratio = config.get("validation_ratio")
     if validation_ratio:
         split = ds.train_test_split(
@@ -85,11 +102,15 @@ def load_sft_dataset(config: dict) -> tuple[Dataset, Dataset | None]:
     return ds, None
 
 
-def build_training_args(config_cls, common_args: dict, eval_enabled: bool):
+def build_training_args(config_cls, common_args: dict, eval_enabled: bool, eval_steps: int | None = None):
     """Build TrainingArguments/SFTConfig with version-compatible eval kwargs."""
     base_args = dict(common_args)
     if eval_enabled:
-        base_args["eval_strategy"] = "epoch"
+        if eval_steps:
+            base_args["eval_strategy"] = "steps"
+            base_args["eval_steps"] = eval_steps
+        else:
+            base_args["eval_strategy"] = "epoch"
 
     optional_keys = ("completion_only_loss", "assistant_only_loss")
     candidates = [base_args]
@@ -204,38 +225,45 @@ def run_generation_benchmark(model, tokenizer, dataset_format: str, config: dict
 
     aggregate = summarize_generation_benchmark(benchmark_rows)
     print(f"[runpodx] Generation benchmark aggregate: {json.dumps(aggregate, indent=2)}")
+    json_report_path, md_report_path = write_generation_benchmark_report(
+        config.get("output_dir", "/workspace/output"),
+        aggregate,
+        benchmark_rows,
+    )
+    print(f"[runpodx] Wrote benchmark reports: {json_report_path} | {md_report_path}")
 
     if report_to == "wandb":
         try:
             import wandb
 
             wandb.log({f"benchmark/{key}": value for key, value in aggregate.items()})
-            table = wandb.Table(
-                columns=[
-                    "prompt",
-                    "response",
-                    "line_count",
-                    "repeat_line_fraction",
-                    "max_consecutive_repeat",
-                    "tail_repeat_count",
-                    "terminated_on_eos",
-                ]
-            )
+            columns = [
+                "prompt",
+                "response",
+                "line_count",
+                "non_empty_line_count",
+                "repeat_line_fraction",
+                "max_consecutive_repeat",
+                "tail_repeat_count",
+                "char_count",
+                "width_std",
+                "occupancy_std",
+                "alnum_fraction",
+                "is_too_short",
+                "is_looping",
+                "is_punctuation_blob",
+                "contains_non_art_text",
+                "failure_tags",
+                "terminated_on_eos",
+            ]
+            table = wandb.Table(columns=columns)
             for row in benchmark_rows:
-                table.add_data(
-                    row["prompt"],
-                    row["response"],
-                    row["line_count"],
-                    row["repeat_line_fraction"],
-                    row["max_consecutive_repeat"],
-                    row["tail_repeat_count"],
-                    row["terminated_on_eos"],
-                )
+                table.add_data(*[row.get(column) for column in columns])
             wandb.log({"benchmark/samples": table})
         except Exception as exc:
             print(f"[runpodx] W&B benchmark logging skipped: {exc}")
 
-    return {"aggregate": aggregate, "rows": benchmark_rows}
+    return {"aggregate": aggregate, "rows": benchmark_rows, "json_report_path": json_report_path, "md_report_path": md_report_path}
 
 
 def patch_rope_compat() -> None:
@@ -358,10 +386,12 @@ def main():
         output_dir=config.get("output_dir", "/workspace/output"),
         num_train_epochs=config.get("num_train_epochs", 3),
         per_device_train_batch_size=config.get("per_device_train_batch_size", 4),
+        per_device_eval_batch_size=config.get("per_device_eval_batch_size", 1),
         gradient_accumulation_steps=config.get("gradient_accumulation_steps", 8),
         learning_rate=config.get("learning_rate", 2e-5),
         warmup_ratio=config.get("warmup_ratio", 0.03),
         weight_decay=config.get("weight_decay", 0.01),
+        max_grad_norm=config.get("max_grad_norm", 1.0),
         bf16=config.get("bf16", True),
         fp16=config.get("fp16", False),
         optim=config.get("optimizer", "adamw_8bit"),
@@ -380,27 +410,35 @@ def main():
     if config.get("convert_to_prompt_completion"):
         common_args["completion_only_loss"] = True
 
-    # trl >= 0.15: SFTConfig has max_seq_length; older: use TrainingArguments
+    # Sequence length: trl >= 0.29 renamed max_seq_length -> max_length in SFTConfig.
+    # Try SFTConfig first (gets max_length right), fall back to TrainingArguments.
     max_seq = config.get("max_seq_length", 2048)
+    eval_steps = config.get("eval_steps")
+    print(f"[runpodx] Configured max sequence length: {max_seq}")
+    if eval_steps:
+        print(f"[runpodx] Eval every {eval_steps} steps")
+    training_args = None
     if SFTConfig is not None:
-        try:
-            training_args = build_training_args(
-                SFTConfig,
-                {"max_seq_length": max_seq, **common_args},
-                eval_enabled=eval_dataset is not None,
-            )
-            max_seq = None  # already in config, don't pass to SFTTrainer
-        except TypeError:
-            training_args = build_training_args(
-                TrainingArguments,
-                common_args,
-                eval_enabled=eval_dataset is not None,
-            )
-    else:
+        for seq_key in ("max_length", "max_seq_length"):
+            try:
+                training_args = build_training_args(
+                    SFTConfig,
+                    {seq_key: max_seq, **common_args},
+                    eval_enabled=eval_dataset is not None,
+                    eval_steps=eval_steps,
+                )
+                print(f"[runpodx] Built SFTConfig with {seq_key}={max_seq}")
+                max_seq = None  # already in config
+                break
+            except (TypeError, ValueError):
+                continue
+    if training_args is None:
+        print("[runpodx] Falling back to TrainingArguments")
         training_args = build_training_args(
             TrainingArguments,
             common_args,
             eval_enabled=eval_dataset is not None,
+            eval_steps=eval_steps,
         )
 
     # --- Train ---

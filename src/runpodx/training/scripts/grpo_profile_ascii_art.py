@@ -30,6 +30,15 @@ except ImportError:
         summarize_generation_benchmark,
     )
 
+try:
+    from clip_ascii_reward import clip_visual_reward, init_clip
+except ImportError:
+    try:
+        from runpodx.training.scripts.clip_ascii_reward import clip_visual_reward, init_clip
+    except ImportError:
+        clip_visual_reward = None
+        init_clip = None
+
 
 PROSE_MARKERS = ("###", "```", "here is", "response:", "assistant:", "user:", "ascii art")
 PROFILE_VECTOR_BINS = 16
@@ -292,6 +301,35 @@ def anti_loop_reward(completions, **kwargs) -> list[float]:
     return rewards
 
 
+def scaffold_penalty_reward(completions, **kwargs) -> list[float]:
+    rewards: list[float] = []
+    for completion in completions:
+        cleaned_completion = normalize_reward_text(str(completion or ""))
+        completion_lines = non_empty_lines(cleaned_completion)
+        if len(completion_lines) < 4:
+            rewards.append(0.2)
+            continue
+
+        interior = completion_lines[1:-1]
+        if not interior:
+            rewards.append(0.2)
+            continue
+
+        repeated_interior_fraction = 1.0 - (len(set(interior)) / len(interior))
+        line_counter = Counter(interior)
+        dominant_share = max(line_counter.values()) / len(interior)
+        vertical_bar_share = sum(1 for line in interior if '|' in line) / len(interior)
+        narrow_line_share = sum(1 for line in interior if len(line.strip()) <= 4) / len(interior)
+
+        penalty = repeated_interior_fraction * 0.7
+        penalty += max(0.0, dominant_share - 0.34) * 1.1
+        penalty += max(0.0, vertical_bar_share - 0.5) * 0.45
+        penalty += max(0.0, narrow_line_share - 0.4) * 0.25
+
+        rewards.append(float(max(-1.0, 1.0 - min(1.8, penalty))))
+    return rewards
+
+
 def target_similarity_reward(completions, target, **kwargs) -> list[float]:
     rewards: list[float] = []
     for completion, expected in zip(completions, target, strict=True):
@@ -364,19 +402,57 @@ def target_length_reward(
     return rewards
 
 
+def eos_reward(completions, *, completion_ids=None, max_completion_length: int = 512, **kwargs) -> list[float]:
+    """Reward proper EOS termination; penalize hitting max length (looping)."""
+    rewards: list[float] = []
+    completion_id_rows = completion_ids or [None] * len(completions)
+    for completion, cids in zip(completions, completion_id_rows):
+        text = str(completion or "").strip()
+        if cids is not None:
+            # If completion_ids length < max_completion_length, it terminated on EOS
+            terminated = len(cids) < max_completion_length
+        else:
+            # Heuristic: very long = likely hit limit
+            terminated = len(text) < max_completion_length * 3
+        if terminated and len(text) > 20:
+            # Clean termination with meaningful content
+            rewards.append(1.0)
+        elif terminated:
+            # Terminated but too short (degenerate)
+            rewards.append(0.0)
+        else:
+            # Hit max length — looping
+            rewards.append(-1.0)
+    return rewards
+
+
 def build_reward_functions(config: dict):
-    target_length = partial(
-        target_length_reward,
-        max_completion_length=int(config.get("grpo_max_completion_length", 192)),
-        soft_overlong_cache=int(config.get("grpo_soft_overlong_cache", 32)),
-    )
-    target_length.__name__ = "target_length_reward"
-    return [
-        ascii_style_reward,
+    max_comp_len = int(config.get("grpo_max_completion_length", 512))
+
+    eos = partial(eos_reward, max_completion_length=max_comp_len)
+    eos.__name__ = "eos_reward"
+
+    # Core 4 rewards: anti_loop, clip, scaffold, eos
+    funcs = [
         anti_loop_reward,
-        target_similarity_reward,
-        target_length,
+        scaffold_penalty_reward,
+        eos,
     ]
+
+    # CLIP visual reward — semantic signal
+    if config.get("grpo_clip_reward", False):
+        if clip_visual_reward is not None:
+            if init_clip is not None:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                init_clip(device)
+            funcs.insert(1, clip_visual_reward)  # order: anti_loop, clip, scaffold, eos
+            print("[runpodx] CLIP visual reward enabled")
+        else:
+            print("[runpodx] WARNING: grpo_clip_reward=true but clip_ascii_reward module not found")
+            print("[runpodx] Falling back to 3 rewards (no CLIP)")
+
+    return funcs
 
 
 def run_generation_benchmark(model, tokenizer, config: dict, report_to: str):

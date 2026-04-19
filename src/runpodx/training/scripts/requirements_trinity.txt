@@ -1,10 +1,11 @@
-torch>=2.1.0
+# torch pinned to 2.4-2.5 range (CUDA 12.x driver compat).
+torch>=2.4.0,<2.6
 git+https://github.com/huggingface/transformers.git
-datasets>=2.18.0
-peft>=0.10.0
-trl>=0.15.0
-accelerate>=0.28.0
-bitsandbytes>=0.43.0
-wandb>=0.16.0
-huggingface_hub>=0.25.0
+datasets>=2.18.0,<5
+peft>=0.10.0,<1
+trl>=0.29.0,<1
+accelerate>=0.28.0,<2
+bitsandbytes>=0.43.0,<1
+wandb>=0.16.0,<1
+huggingface_hub>=0.25.0,<2
 filelock>=3.16.0

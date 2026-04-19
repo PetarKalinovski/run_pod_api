@@ -57,6 +57,7 @@ class GRPOMethod(BaseMethod):
             "grpo_top_p": t.grpo_top_p,
             "grpo_reward_weights": t.grpo_reward_weights,
             "grpo_profile": t.grpo_profile,
+            "grpo_clip_reward": t.grpo_clip_reward,
             "output_dir": o.save_path,
             "push_to_hub": o.push_to_hub,
             "hub_model_id": o.hub_model_id,

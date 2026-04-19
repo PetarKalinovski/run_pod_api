@@ -125,23 +125,26 @@ class TrainingOrchestrator:
                 )
                 self._download_output(config)
 
-            # Post-training: terminate pod
-            if self._should_terminate_pod(config):
-                terminate_reason = "successful completion"
-                if config.run.terminate_after_hub_push:
-                    terminate_reason = "successful Hub push"
-                self._console.print(
-                    f"[bold yellow]Terminating pod {pod.id} after {terminate_reason}...[/]"
-                )
-                self._pods.delete(pod.id)
-                self._console.print(f"  [red]Pod {pod.id} deleted.[/]")
-
         except Exception:
             self._console.print("[bold red]Training failed.[/]")
             raise
         finally:
             if self._executor:
                 self._executor._conn.cleanup()
+            # Always terminate pod if configured, even after failures.
+            # SSH broken pipe (exit 255) often means training actually finished
+            # but the connection dropped during final eval/upload.
+            if self._pod and self._should_terminate_pod(config):
+                try:
+                    self._console.print(
+                        f"[bold yellow]Terminating pod {self._pod.id} (cleanup)...[/]"
+                    )
+                    self._pods.delete(self._pod.id)
+                    self._console.print(f"  [red]Pod {self._pod.id} deleted.[/]")
+                except Exception as cleanup_exc:
+                    self._console.print(
+                        f"  [red]Pod cleanup failed: {cleanup_exc}[/]"
+                    )
 
     def _get_or_create_pod(self, config: RunConfig) -> Pod:
         if config.run.pod_id:
@@ -312,8 +315,18 @@ class TrainingOrchestrator:
             raise RuntimeError(f"Config upload failed: {result.stderr}")
 
     def _install_dependencies(self) -> None:
+        # Upgrade torch first — the pod image ships torch 2.1 which is too old
+        # for TRL 0.29+ (needs FSDPModule from torch 2.6+). Installing torch
+        # separately ensures it's upgraded before TRL tries to import it.
+        torch_proc = self._executor.run(
+            "pip install 'torch>=2.6.0,<2.11'",
+            stream=True,
+            on_stdout=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
+            on_stderr=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
+        )
+        torch_proc.wait()
         proc = self._executor.run(
-            f"pip install --upgrade -r {REMOTE_WORK_DIR}/requirements.txt",
+            f"pip install -r {REMOTE_WORK_DIR}/requirements.txt",
             stream=True,
             on_stdout=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
             on_stderr=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
