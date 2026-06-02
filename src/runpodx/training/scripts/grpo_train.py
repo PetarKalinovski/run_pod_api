@@ -287,6 +287,7 @@ def main():
         push_to_hub=config.get("push_to_hub", False),
         hub_model_id=config.get("hub_model_id") or None,
         hub_token=config.get("hub_token") or None,
+        hub_strategy=config.get("hub_strategy", "end"),
         remove_unused_columns=False,
         gradient_checkpointing=True,
         max_completion_length=config.get("grpo_max_completion_length", 192),

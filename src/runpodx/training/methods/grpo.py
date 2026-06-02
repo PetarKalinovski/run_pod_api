@@ -69,6 +69,7 @@ class GRPOMethod(BaseMethod):
             "push_to_hub": o.push_to_hub,
             "hub_model_id": o.hub_model_id,
             "hub_token": o.hub_token,
+            "hub_strategy": o.hub_strategy,
             "wandb_project": mon.wandb_project,
             "wandb_run_name": mon.wandb_run_name,
             "wandb_entity": mon.wandb_entity,

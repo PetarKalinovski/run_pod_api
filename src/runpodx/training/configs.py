@@ -336,6 +336,18 @@ class OutputConfig(BaseConfig):
     push_to_hub: Annotated[bool, Field(description="Push to HuggingFace Hub.")] = False
     hub_model_id: Annotated[str, Field(description="Hub model ID.")] = ""
     hub_token: Annotated[str | None, Field(description="Hub token.")] = None
+    hub_strategy: Annotated[
+        str,
+        Field(
+            description=(
+                "When to push to the Hub. One of 'end' (push only the final model — "
+                "default), 'every_save' (push at every checkpoint save as a new commit), "
+                "'checkpoint' (push the latest checkpoint dir on each save, overwriting), "
+                "'all_checkpoints' (push every checkpoint as its own subfolder on the "
+                "same repo, addressable via `subfolder=` in from_pretrained)."
+            ),
+        ),
+    ] = "end"
 
 
 class MonitoringConfig(BaseConfig):
