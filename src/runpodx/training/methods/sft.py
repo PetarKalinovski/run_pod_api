@@ -31,7 +31,10 @@ class SFTMethod(BaseMethod):
     def preinstall_commands(self, run_config: RunConfig | None = None) -> list[str]:
         if self._use_trinity_runtime(run_config):
             return []
-        return ["pip install 'torch>=2.6.0,<2.11'"]
+        return [
+            "pip uninstall -y torchvision torchaudio",
+            "pip install 'torch>=2.6.0,<2.11'",
+        ]
 
     def generate_remote_config(self, run_config: RunConfig) -> dict:
         """Flatten RunConfig into the JSON format the SFT script expects."""

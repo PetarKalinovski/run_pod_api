@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -15,5 +17,5 @@ class TemplateModel(BaseModel):
     container_disk_in_gb: int | None = Field(alias="containerDiskInGb", default=None)
     volume_in_gb: int | None = Field(alias="volumeInGb", default=None)
     volume_mount_path: str | None = Field(alias="volumeMountPath", default=None)
-    ports: str | None = None
-    env: list[dict] | None = None
+    ports: str | list[str] | None = None
+    env: list[dict[str, Any]] | dict[str, Any] | None = None

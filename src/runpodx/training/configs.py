@@ -47,6 +47,10 @@ class PodSpecConfig(BaseConfig):
     """Pod specification for provisioning a new pod."""
 
     name: Annotated[str, Field(description="Pod name.")] = "runpodx-training"
+    template_id: Annotated[
+        str | None,
+        Field(description="RunPod template ID to use instead of a raw image-only pod."),
+    ] = None
     image: Annotated[str, Field(description="Container image.")] = (
         "runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04"
     )

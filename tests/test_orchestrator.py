@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from runpodx.training.configs import (
     RunConfig,
     RunMetaConfig,
     ScriptConfig,
+    SSHConfig,
     TrainingConfig,
 )
 from runpodx.training.methods import get_method
@@ -228,24 +230,24 @@ class TestTrainingOrchestrator:
         self, mock_ssh_conn_cls, mock_executor_cls, mock_pod_manager, sample_run_config
     ):
         mock_executor = MagicMock()
-        mock_executor.test_connection.return_value = True
+        mock_executor.check_connection.return_value = subprocess.CompletedProcess(
+            args=["ssh"], returncode=0, stdout="ok\n", stderr=""
+        )
         mock_executor.run.return_value = MagicMock(returncode=0)
         mock_executor.upload.return_value = MagicMock(returncode=0)
         mock_executor_cls.return_value = mock_executor
 
         orchestrator = TrainingOrchestrator(mock_pod_manager)
 
-        # Mock the streaming process for training
-        mock_proc = MagicMock()
-        mock_proc.wait.return_value = None
-        mock_proc.returncode = 0
-        # The first calls to run() with stream=False return CompletedProcess
-        # The last call with stream=True returns the mock_proc
         mock_executor.run.side_effect = [
             MagicMock(returncode=0),  # mkdir
+            MagicMock(returncode=0),  # uninstall incompatible vision/audio deps
             MagicMock(returncode=0),  # torch install
             MagicMock(returncode=0),  # pip install
-            mock_proc,                # training
+            MagicMock(returncode=0, stdout="123\n"),  # detached training start
+            MagicMock(returncode=0, stdout="\n__RUNPODX_LOG_SIZE__0\n"),  # log poll
+            MagicMock(returncode=0, stdout="0\n"),  # exit code poll
+            MagicMock(returncode=0, stdout="\n__RUNPODX_LOG_SIZE__0\n"),  # final log poll
         ]
 
         orchestrator.run(sample_run_config)
@@ -269,24 +271,48 @@ class TestTrainingOrchestrator:
             output=OutputConfig(push_to_hub=True, hub_model_id="user/model"),
         )
         mock_executor = MagicMock()
-        mock_executor.test_connection.return_value = True
+        mock_executor.check_connection.return_value = subprocess.CompletedProcess(
+            args=["ssh"], returncode=0, stdout="ok\n", stderr=""
+        )
         mock_executor.upload.return_value = MagicMock(returncode=0)
         mock_executor_cls.return_value = mock_executor
 
-        mock_proc = MagicMock()
-        mock_proc.wait.return_value = None
-        mock_proc.returncode = 0
         mock_executor.run.side_effect = [
             MagicMock(returncode=0),  # mkdir
+            MagicMock(returncode=0),  # uninstall incompatible vision/audio deps
             MagicMock(returncode=0),  # torch install
             MagicMock(returncode=0),  # pip install
-            mock_proc,                # training
+            MagicMock(returncode=0, stdout="123\n"),  # detached training start
+            MagicMock(returncode=0, stdout="\n__RUNPODX_LOG_SIZE__0\n"),  # log poll
+            MagicMock(returncode=0, stdout="0\n"),  # exit code poll
+            MagicMock(returncode=0, stdout="\n__RUNPODX_LOG_SIZE__0\n"),  # final log poll
         ]
 
         orchestrator = TrainingOrchestrator(mock_pod_manager)
         orchestrator.run(config)
 
         mock_pod_manager.delete.assert_called_once_with("pod_abc123")
+
+    def test_new_pod_uses_template_and_injects_public_key(
+        self, tmp_path, mock_pod_manager, sample_run_config_new_pod
+    ):
+        private_key = tmp_path / "id_ed25519"
+        public_key = tmp_path / "id_ed25519.pub"
+        private_key.write_text("private key")
+        public_key.write_text("ssh-ed25519 AAAATEST runpodx-test\n")
+        sample_run_config_new_pod.pod.template_id = "runpod-torch-v240"
+        sample_run_config_new_pod.ssh = SSHConfig(key_path=str(private_key))
+
+        orchestrator = TrainingOrchestrator(mock_pod_manager)
+        orchestrator._get_or_create_pod(sample_run_config_new_pod)
+
+        pod_config = mock_pod_manager.create.call_args.args[0]
+        payload = pod_config.to_api_payload()
+
+        assert payload["env"]["PUBLIC_KEY"] == "ssh-ed25519 AAAATEST runpodx-test"
+        assert payload["env"]["SSH_PUBLIC_KEY"] == "ssh-ed25519 AAAATEST runpodx-test"
+        assert payload["templateId"] == "runpod-torch-v240"
+        assert "dockerStartCmd" not in payload
 
 
 class TestMethodRegistry:

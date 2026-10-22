@@ -19,7 +19,10 @@ class GRPOMethod(BaseMethod):
         return _SCRIPTS_DIR / "requirements.txt"
 
     def preinstall_commands(self, run_config: RunConfig | None = None) -> list[str]:
-        return ["pip install 'torch>=2.6.0,<2.11'"]
+        return [
+            "pip uninstall -y torchvision torchaudio",
+            "pip install 'torch>=2.6.0,<2.11'",
+        ]
 
     def generate_remote_config(self, run_config: RunConfig) -> dict:
         if run_config.model is None or run_config.dataset is None:

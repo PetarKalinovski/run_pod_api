@@ -71,6 +71,10 @@ class SSHConnection:
         return [
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "BatchMode=yes",
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "LogLevel=ERROR",
             "-o", f"ConnectTimeout={self.connect_timeout}",
             "-p", str(self.port),
             "-i", key,
@@ -82,6 +86,10 @@ class SSHConnection:
         return [
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "BatchMode=yes",
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "LogLevel=ERROR",
             "-o", f"ConnectTimeout={self.connect_timeout}",
             "-P", str(self.port),
             "-i", key,
@@ -96,11 +104,29 @@ class SSHExecutor:
 
     def test_connection(self) -> bool:
         """Verify SSH connectivity."""
+        return self.check_connection().returncode == 0
+
+    def check_connection(self) -> subprocess.CompletedProcess:
+        """Run a cheap SSH probe and keep stderr available to callers.
+
+        Bounded by an overall timeout: ``ConnectTimeout`` only covers the TCP
+        connect, so a probe whose handshake stalls after connecting would
+        otherwise hang forever while the pod keeps billing (observed twice,
+        ~13 h on 2026-09-01). ``subprocess.run`` kills the child on expiry and
+        the ``TimeoutExpired`` is folded into a non-zero result so the caller's
+        retry loop simply tries again.
+        """
+        probe_timeout = max(60, 2 * self._conn.connect_timeout)
         try:
-            result = self.run("echo ok", stream=False)
-            return result.returncode == 0
-        except Exception:
-            return False
+            result = self.run("echo ok", stream=False, timeout=probe_timeout)
+            return result
+        except Exception as exc:
+            return subprocess.CompletedProcess(
+                args=["ssh"],
+                returncode=255,
+                stdout="",
+                stderr=str(exc),
+            )
 
     def run(
         self,

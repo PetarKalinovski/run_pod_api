@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import tempfile
 import time
 from pathlib import Path
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("runpodx.training")
 
 REMOTE_WORK_DIR = "/workspace/runpodx_run"
+REMOTE_LOG_PATH = f"{REMOTE_WORK_DIR}/runpodx_remote.log"
+REMOTE_EXIT_CODE_PATH = f"{REMOTE_WORK_DIR}/runpodx_exit_code"
 
 
 class TrainingOrchestrator:
@@ -158,6 +161,7 @@ class TrainingOrchestrator:
         spec = config.pod
         pod_config = PodCreateConfig(
             name=spec.name,
+            template_id=spec.template_id,
             image=spec.image,
             cloud_type=spec.cloud_type,
             gpu=spec.gpu,
@@ -184,14 +188,37 @@ class TrainingOrchestrator:
         if config.monitoring.wandb_project:
             env["WANDB_PROJECT"] = config.monitoring.wandb_project
 
-        # Inject SSH public key so the RunPod image sets up authorized_keys.
+        # Inject SSH public key so the pod can bootstrap authorized_keys.
         # The dashboard does this automatically; the REST API does not.
         key_path = config.ssh.key_path or "~/.ssh/id_ed25519"
-        pub_key_path = Path(key_path).expanduser().with_suffix(".pub")
-        if pub_key_path.exists():
-            env["PUBLIC_KEY"] = pub_key_path.read_text().strip()
+        pub_key_path = self._resolve_public_key_path(key_path)
+        if pub_key_path is None:
+            expanded_key_path = Path(key_path).expanduser()
+            raise RuntimeError(
+                "SSH public key not found. Expected one of: "
+                f"{expanded_key_path}.pub or {expanded_key_path.with_suffix('.pub')}"
+            )
+        public_key = pub_key_path.read_text().strip()
+        env["PUBLIC_KEY"] = public_key
+        env["SSH_PUBLIC_KEY"] = public_key
 
         return env
+
+    @staticmethod
+    def _resolve_public_key_path(key_path: str) -> Path | None:
+        private_key_path = Path(key_path).expanduser()
+        candidates = [
+            Path(f"{private_key_path}.pub"),
+            private_key_path.with_suffix(".pub"),
+        ]
+        seen: set[Path] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.exists():
+                return candidate
+        return None
 
     def _wait_for_ssh_port(
         self, pod: Pod, max_attempts: int = 20, interval: int = 10
@@ -220,15 +247,21 @@ class TrainingOrchestrator:
             "SSH port mapping not available after max retries."
         )
 
-    def _wait_for_ssh(self, max_attempts: int = 12, interval: int = 10) -> None:
+    def _wait_for_ssh(self, max_attempts: int = 30, interval: int = 10) -> None:
+        last_error_text = ""
         for attempt in range(max_attempts):
-            if self._executor.test_connection():
+            result = self._executor.check_connection()
+            if result.returncode == 0:
                 return
+            last_error_lines = (result.stderr or result.stdout or "").strip().splitlines()
+            last_error_text = last_error_lines[-1] if last_error_lines else "no stderr"
             self._console.print(
-                f"  SSH not ready, retrying ({attempt + 1}/{max_attempts})..."
+                "  SSH not ready, retrying "
+                f"({attempt + 1}/{max_attempts}): {last_error_text}"
             )
             time.sleep(interval)
-        raise RuntimeError("SSH connection failed after max retries.")
+        detail = f" Last SSH error: {last_error_text}" if last_error_text else ""
+        raise RuntimeError(f"SSH connection failed after max retries.{detail}")
 
     def _upload_scripts(self, method, config: RunConfig) -> None:
         script_path = method.script_path(config)
@@ -353,6 +386,7 @@ class TrainingOrchestrator:
         env_map = {
             "WANDB_API_KEY": os.environ.get("WANDB_API_KEY"),
             "HF_TOKEN": config.output.hub_token or os.environ.get("HF_TOKEN"),
+            "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY"),
         }
         exports = []
         for key, val in env_map.items():
@@ -365,28 +399,112 @@ class TrainingOrchestrator:
             self._console.print("  [green]API keys forwarded to pod.[/]")
 
     def _run_remote_job(self, config: RunConfig, method) -> None:
-        env_prefix = ""
         wandb_key = os.environ.get("WANDB_API_KEY")
         hf_token = config.output.hub_token or os.environ.get("HF_TOKEN")
-        env_parts = []
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        export_lines = []
         if wandb_key:
-            env_parts.append(f"WANDB_API_KEY={wandb_key}")
+            export_lines.append(f"export WANDB_API_KEY={shlex.quote(wandb_key)}")
         if hf_token:
-            env_parts.append(f"HF_TOKEN={hf_token}")
-        if env_parts:
-            env_prefix = " ".join(env_parts) + " "
+            export_lines.append(f"export HF_TOKEN={shlex.quote(hf_token)}")
+        if openrouter_key:
+            export_lines.append(f"export OPENROUTER_API_KEY={shlex.quote(openrouter_key)}")
 
         remote_command = method.remote_command(REMOTE_WORK_DIR, config)
-        cmd = f"cd {REMOTE_WORK_DIR} && {env_prefix}{remote_command}"
-        proc = self._executor.run(
-            cmd,
-            stream=True,
-            on_stdout=lambda line: self._console.print(f"  {line}"),
-            on_stderr=lambda line: self._console.print(f"  [dim]{line}[/dim]"),
+        job_script = "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -o pipefail",
+                f"cd {shlex.quote(REMOTE_WORK_DIR)}",
+                *export_lines,
+                f"{remote_command} 2>&1 | tee -a {shlex.quote(REMOTE_LOG_PATH)}",
+                "status=${PIPESTATUS[0]}",
+                f"echo \"$status\" > {shlex.quote(REMOTE_EXIT_CODE_PATH)}",
+                "exit \"$status\"",
+                "",
+            ]
         )
-        proc.wait()
-        if proc.returncode != 0:
-            raise RuntimeError(f"Training exited with code {proc.returncode}")
+        self._upload_remote_job_script(job_script)
+
+        start_cmd = (
+            f"cd {shlex.quote(REMOTE_WORK_DIR)}; "
+            f"rm -f {shlex.quote(REMOTE_LOG_PATH)} {shlex.quote(REMOTE_EXIT_CODE_PATH)}; "
+            f"touch {shlex.quote(REMOTE_LOG_PATH)}; "
+            "chmod +x runpodx_job.sh; "
+            "nohup bash runpodx_job.sh > runpodx_nohup.log 2>&1 < /dev/null & "
+            "echo $!"
+        )
+        result = self._executor.run(start_cmd, stream=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to start remote job: {result.stderr}")
+        pid = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "unknown"
+        self._console.print(
+            f"  Remote job started as PID {pid}; log: {REMOTE_LOG_PATH}"
+        )
+
+        log_offset = 0
+        while True:
+            log_offset = self._stream_remote_log(log_offset)
+            exit_result = self._executor.run(
+                (
+                    f"if [ -f {shlex.quote(REMOTE_EXIT_CODE_PATH)} ]; then "
+                    f"cat {shlex.quote(REMOTE_EXIT_CODE_PATH)}; else echo RUNNING; fi"
+                ),
+                stream=False,
+            )
+            state = exit_result.stdout.strip()
+            if state and state != "RUNNING":
+                log_offset = self._stream_remote_log(log_offset)
+                try:
+                    exit_code = int(state)
+                except ValueError as exc:
+                    raise RuntimeError(f"Invalid remote exit code: {state!r}") from exc
+                if exit_code != 0:
+                    raise RuntimeError(
+                        f"Training exited with code {exit_code}. Remote log: {REMOTE_LOG_PATH}"
+                    )
+                return
+            time.sleep(10)
+
+    def _upload_remote_job_script(self, job_script: str) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+            f.write(job_script)
+            tmp_path = f.name
+
+        try:
+            result = self._executor.upload(tmp_path, f"{REMOTE_WORK_DIR}/runpodx_job.sh")
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Remote job script upload failed: {result.stderr}")
+
+    def _stream_remote_log(self, offset: int) -> int:
+        marker = "__RUNPODX_LOG_SIZE__"
+        result = self._executor.run(
+            (
+                f"size=$(wc -c < {shlex.quote(REMOTE_LOG_PATH)} 2>/dev/null || echo 0); "
+                f"if [ \"$size\" -gt {offset} ]; then "
+                f"tail -c +{offset + 1} {shlex.quote(REMOTE_LOG_PATH)}; "
+                "fi; "
+                f"printf '\\n{marker}%s\\n' \"$size\""
+            ),
+            stream=False,
+        )
+        if result.returncode != 0:
+            return offset
+        output = result.stdout
+        marker_index = output.rfind(f"\n{marker}")
+        if marker_index == -1:
+            return offset
+        chunk = output[:marker_index].strip("\n")
+        if chunk:
+            for line in chunk.splitlines():
+                self._console.print(f"  {line}")
+        size_text = output[marker_index + len(marker) + 1 :].strip()
+        try:
+            return int(size_text)
+        except ValueError:
+            return offset
 
     def _download_output(self, config: RunConfig) -> None:
         """Download training output from the pod to a local directory."""
