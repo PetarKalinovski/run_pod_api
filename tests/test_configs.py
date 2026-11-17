@@ -42,9 +42,11 @@ class TestPodCreateConfig:
     def test_to_api_payload_minimal(self):
         config = PodCreateConfig(image="pytorch/pytorch:2.1.0")
         payload = config.to_api_payload()
-        assert payload["imageName"] == "pytorch/pytorch:2.1.0"
-        assert payload["gpuCount"] == 1
-        assert payload["containerDiskInGb"] == 50
+        assert payload["image"] == "pytorch/pytorch:2.1.0"
+        assert payload["gpu"]["count"] == 1
+        assert "id" not in payload["gpu"]
+        assert payload["disk"] == 50
+        assert payload["mounts"] == {"persistent": {"size": 20, "path": "/workspace"}}
         assert "gpuTypeIds" not in payload
 
     def test_to_api_payload_full(self):
@@ -56,10 +58,24 @@ class TestPodCreateConfig:
             docker_start_cmd=["python", "train.py"],
         )
         payload = config.to_api_payload()
-        assert payload["gpuTypeIds"] == ["RTX 4090"]
-        assert payload["gpuCount"] == 2
-        assert payload["networkVolumeId"] == "vol_123"
-        assert payload["dockerStartCmd"] == ["python", "train.py"]
+        assert payload["gpu"]["id"] == "RTX 4090"
+        assert payload["gpu"]["count"] == 2
+        assert payload["mounts"] == {"network": [{"volumeId": "vol_123", "path": "/workspace"}]}
+        assert payload["cmd"] == ["python", "train.py"]
+        assert payload["cloud"] == "SECURE"
+
+    def test_to_api_payload_one_gpu_type(self):
+        config = PodCreateConfig(image="x", gpu=GpuConfig(type_ids=["A40", "L40S"]))
+        assert config.to_api_payload()["gpu"]["id"] == "A40"
+        assert config.to_api_payload(gpu_type_id="L40S")["gpu"]["id"] == "L40S"
+
+    def test_to_api_payload_small_volume_raised_to_minimum(self):
+        config = PodCreateConfig(image="x", storage=StorageConfig(volume_gb=5))
+        assert config.to_api_payload()["mounts"]["persistent"]["size"] == 10
+
+    def test_to_api_payload_no_volume(self):
+        config = PodCreateConfig(image="x", storage=StorageConfig(volume_gb=0))
+        assert "mounts" not in config.to_api_payload()
 
 
 class TestTomlLoader:

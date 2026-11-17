@@ -16,7 +16,7 @@ from runpodx.http.transport import HttpTransport, TransportConfig
 class TestTransportConfig:
     def test_defaults(self):
         config = TransportConfig()
-        assert config.base_url == "https://rest.runpod.io/v1"
+        assert config.base_url == "https://api.runpod.io/v2"
         assert config.api_key is None
         assert config.timeout == 30.0
         assert config.max_retries == 3

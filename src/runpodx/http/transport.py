@@ -24,7 +24,7 @@ from runpodx.http.errors import (
 
 logger = logging.getLogger("runpodx")
 
-_BASE_URL = "https://rest.runpod.io/v1"
+_BASE_URL = "https://api.runpod.io/v2"   # (REST v1, rest.runpod.io/v1, was retired on 2026-11-15)
 
 
 class TransportConfig(BaseModel):

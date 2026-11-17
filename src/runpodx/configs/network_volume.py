@@ -18,7 +18,7 @@ class NetworkVolumeCreateConfig(BaseConfig):
         return {
             "name": self.name,
             "size": self.size_gb,
-            "dataCenterId": self.data_center_id,
+            "dataCenter": self.data_center_id,   # (REST v2: dataCenter, v1's dataCenterId)
         }
 
 

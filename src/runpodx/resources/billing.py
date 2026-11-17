@@ -36,7 +36,8 @@ class BillingManager:
         if gpu_type_id:
             params["gpuTypeId"] = gpu_type_id
         raw = self._transport.request("GET", "/billing/pods", params=params)
-        return [BillingRecord.model_validate(item) for item in raw]
+        # (REST v2: {"records": [...], "metadata": ...})
+        return [BillingRecord.model_validate(item) for item in (raw.get("records", []) if isinstance(raw, dict) else raw)]
 
     def endpoints(
         self,
@@ -55,5 +56,5 @@ class BillingManager:
             params["endTime"] = end_time.isoformat()
         if endpoint_id:
             params["endpointId"] = endpoint_id
-        raw = self._transport.request("GET", "/billing/endpoints", params=params)
-        return [BillingRecord.model_validate(item) for item in raw]
+        raw = self._transport.request("GET", "/billing/serverless", params=params)
+        return [BillingRecord.model_validate(item) for item in (raw.get("records", []) if isinstance(raw, dict) else raw)]

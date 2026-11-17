@@ -7,6 +7,8 @@ from runpodx.configs.loader import resolve_config
 from runpodx.configs.template import TemplateCreateConfig, TemplateUpdateConfig
 from runpodx.models.template import TemplateModel
 
+from runpodx.http.pages import collect
+
 if TYPE_CHECKING:
     from runpodx.http.transport import HttpTransport
 
@@ -28,8 +30,8 @@ class TemplateManager:
             "includePublicTemplates": include_public,
             "includeRunpodTemplates": include_runpod,
         }
-        raw = self._transport.request("GET", "/templates", params=params)
-        return [TemplateModel.model_validate(item) for item in raw]
+        # (REST v2: a list wrapped as {"templates": [...], "pagination": ...})
+        return [TemplateModel.model_validate(item) for item in collect(self._transport, "/templates", "templates", params)]
 
     def create(self, config: str | Path | dict | TemplateCreateConfig) -> TemplateModel:
         """Create a new template."""

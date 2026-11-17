@@ -138,46 +138,52 @@ class PodCreateConfig(BaseConfig):
         Field(description="Container registry credentials ID for private images."),
     ] = None
 
-    def to_api_payload(self) -> dict:
-        """Convert to the RunPod REST API request body format."""
+    def to_api_payload(self, gpu_type_id: str | None = None) -> dict:
+        """The REST API v2 request body (``POST /v2/pods``): the GPU nested as ``gpu: {id,
+        count}`` (one type a pod: ``gpu_type_id``, else the first of ``gpu.type_ids``), the
+        storage as ``mounts`` (a network volume, or a persistent volume of at least 10 GB),
+        the container disk as ``disk``. v1's ``interruptible``, ``gpuTypePriority``,
+        ``dataCenterPriority``, ``countryCodes`` and ``supportPublicIp`` have no v2 field:
+        a pod's TCP ports are published on a public IP, and a CPU pod takes ``cpu`` (not
+        supported by this config).
+        """
+        if self.compute_type == "CPU":
+            raise ValueError("CPU pods take `cpu: {id, vcpuCount}` in REST v2; not supported by PodCreateConfig yet.")
+        if self.interruptible:
+            raise ValueError("REST v2 has no interruptible (spot) pods.")
         payload: dict = {
             "name": self.name,
-            "imageName": self.image,
-            "computeType": self.compute_type,
-            "cloudType": self.cloud_type,
-            "gpuCount": self.gpu.count,
-            "minRAMPerGPU": self.gpu.min_ram_per_gpu,
-            "minVCPUPerGPU": self.gpu.min_vcpu_per_gpu,
-            "containerDiskInGb": self.storage.container_disk_gb,
-            "volumeInGb": self.storage.volume_gb,
-            "volumeMountPath": self.storage.volume_mount_path,
+            "cloud": self.cloud_type,
+            "disk": self.storage.container_disk_gb,
             "ports": self.networking.ports,
-            "interruptible": self.interruptible,
-            "locked": self.locked,
             "env": self.env,
         }
+        if self.image:
+            payload["image"] = self.image
         if self.template_id is not None:
             payload["templateId"] = self.template_id
-        if self.gpu.type_ids is not None:
-            payload["gpuTypeIds"] = self.gpu.type_ids
-            payload["gpuTypePriority"] = self.gpu.type_priority
+        type_id = gpu_type_id or (self.gpu.type_ids[0] if self.gpu.type_ids else None)
+        gpu: dict = {"count": self.gpu.count, "minRamPerGpu": self.gpu.min_ram_per_gpu,
+                     "minVcpuCountPerGpu": self.gpu.min_vcpu_per_gpu}
+        if type_id:
+            gpu["id"] = type_id
         if self.gpu.allowed_cuda_versions is not None:
-            payload["allowedCudaVersions"] = self.gpu.allowed_cuda_versions
+            gpu["allowedCudaVersions"] = self.gpu.allowed_cuda_versions
+        payload["gpu"] = gpu
         if self.storage.network_volume_id is not None:
-            payload["networkVolumeId"] = self.storage.network_volume_id
+            payload["mounts"] = {"network": [{"volumeId": self.storage.network_volume_id,
+                                              "path": self.storage.volume_mount_path}]}
+        elif self.storage.volume_gb > 0:
+            payload["mounts"] = {"persistent": {"size": max(10, self.storage.volume_gb),
+                                                "path": self.storage.volume_mount_path}}
         if self.networking.data_center_ids is not None:
             payload["dataCenterIds"] = self.networking.data_center_ids
-            payload["dataCenterPriority"] = self.networking.data_center_priority
-        if self.networking.country_codes is not None:
-            payload["countryCodes"] = self.networking.country_codes
-        if self.networking.support_public_ip is not None:
-            payload["supportPublicIp"] = self.networking.support_public_ip
         if self.docker_entrypoint:
-            payload["dockerEntrypoint"] = self.docker_entrypoint
+            payload["entrypoint"] = self.docker_entrypoint
         if self.docker_start_cmd:
-            payload["dockerStartCmd"] = self.docker_start_cmd
+            payload["cmd"] = self.docker_start_cmd
         if self.container_registry_auth_id is not None:
-            payload["containerRegistryAuthId"] = self.container_registry_auth_id
+            payload["registry"] = self.container_registry_auth_id
         return payload
 
 
@@ -197,11 +203,12 @@ class PodUpdateConfig(BaseConfig):
         """Convert to the RunPod REST API request body format."""
         payload: dict = {}
         if self.image is not None:
-            payload["imageName"] = self.image
+            payload["image"] = self.image
         if self.container_disk_gb is not None:
-            payload["containerDiskInGb"] = self.container_disk_gb
+            payload["disk"] = self.container_disk_gb
+        # (REST v2: a pod's mounts are fixed at creation, and its GPUs are not changed by an update)
         if self.volume_gb is not None:
-            payload["volumeInGb"] = self.volume_gb
+            raise ValueError("REST v2 cannot change a pod's volume size after creation.")
         if self.gpu_count is not None:
-            payload["gpuCount"] = self.gpu_count
+            raise ValueError("REST v2 cannot change a pod's GPU count after creation.")
         return payload

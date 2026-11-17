@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class NetworkVolumeModel(BaseModel):
@@ -11,4 +11,5 @@ class NetworkVolumeModel(BaseModel):
     id: str
     name: str = ""
     size: int = 0
-    data_center_id: str = Field(alias="dataCenterId", default="")
+    data_center_id: str = Field(default="", validation_alias=AliasChoices("dataCenter", "dataCenterId"))
+    type: str | None = None

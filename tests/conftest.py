@@ -33,21 +33,21 @@ def mock_transport():
 
 @pytest.fixture
 def sample_pod_data():
-    """Sample pod API response data."""
+    """Sample pod API response data (REST v2's shape)."""
     return {
         "id": "pod_abc123",
         "name": "test-pod",
-        "desiredStatus": "RUNNING",
-        "imageName": "runpod/pytorch:2.1.0",
-        "gpuTypeId": "NVIDIA GeForce RTX 4090",
-        "gpuCount": 1,
-        "containerDiskInGb": 50,
-        "volumeInGb": 20,
-        "volumeMountPath": "/workspace",
-        "publicIp": "1.2.3.4",
-        "costPerHr": 0.44,
-        "cloudType": "SECURE",
-        "computeType": "GPU",
+        "status": "RUNNING",
+        "image": "runpod/pytorch:2.1.0",
+        "disk": 50,
+        "ports": ["22/tcp", "8888/http"],
+        "gpu": {"id": "NVIDIA GeForce RTX 4090", "count": 1, "vcpuCount": 16, "memory": 64},
+        "mounts": {"persistent": {"size": 20, "path": "/workspace"}},
+        "cloud": "SECURE",
         "dataCenterId": "US-TX-3",
-        "portMappings": {"22": 15538, "8888": 18888},
+        "cost": 0.44,
+        "ssh": {"proxy": None, "direct": {"host": "1.2.3.4", "port": 15538, "username": "root",
+                                          "command": "ssh root@1.2.3.4 -p 15538"}},
+        "runtime": {"uptime": 120, "ports": [{"private": 22, "public": 15538, "type": "tcp", "ip": "1.2.3.4"},
+                                             {"private": 8888, "public": 18888, "type": "tcp", "ip": "1.2.3.4"}]},
     }
